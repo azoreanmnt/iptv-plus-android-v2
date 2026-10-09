@@ -7,7 +7,9 @@ plugins {
 android {
     namespace = "pt.iptvplus.app"
     compileSdk = 35
-    defaultConfig {
+    defaultConfig { versionCode = 13
+    versionName = "0.4.1"
+}
         applicationId = "pt.iptvplus.app"
         minSdk = 23
         targetSdk = 35
