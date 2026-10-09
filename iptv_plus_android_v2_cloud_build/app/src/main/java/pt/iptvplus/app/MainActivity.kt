@@ -67,7 +67,7 @@ private val bg = Color(0xFF080D18)
 private val panel = Color(0xFF111A2B)
 private val muted = Color(0xFF9BAAC2)
 private val accents = listOf(Color(0xFF7C5CFF), Color(0xFF24C8E8), Color(0xFF47E0C0), Color(0xFFFF6B8A), Color(0xFFFFB547), Color(0xFF4C8DFF), Color(0xFFB879FF), Color(0xFFFA6BCE))
-private data class TvItem(val name:String, val url:String, val group:String="Geral", val logo:String="", val kind:String="live", val id:String="", val extension:String="mp4")
+data class TvItem(val name:String, val url:String, val group:String="Geral", val logo:String="", val kind:String="live", val id:String="", val extension:String="mp4")
 private data class Programme(val channel:String, val title:String, val start:String, val stop:String)
 private data class OnlineSubtitle(val fileId: Long, val language: String, val release: String, val downloads: Int)
 
