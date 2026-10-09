@@ -65,4 +65,3 @@ class CatalogDatabase(context: Context) : SQLiteOpenHelper(context, "iptv_plus_c
         }
     }
 }
-
