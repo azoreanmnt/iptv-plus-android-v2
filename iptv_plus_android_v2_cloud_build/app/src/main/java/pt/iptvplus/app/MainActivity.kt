@@ -393,4 +393,3 @@ private object IptvData {
     }
     private fun formatTime(s:String):String = if (s.length >= 14) "${s.substring(6,8)}/${s.substring(4,6)} ${s.substring(8,10)}:${s.substring(10,12)}" else s
 }
-
