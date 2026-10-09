@@ -1,6 +1,8 @@
 package pt.iptvplus.app
 
 import android.content.res.Configuration
+import android.util.JsonReader
+import android.util.JsonToken
 import android.net.Uri
 import android.os.Bundle
 import android.view.View
@@ -25,6 +27,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
@@ -35,8 +38,13 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.lifecycleScope
 import androidx.media3.common.MediaItem
+import coil.compose.AsyncImage
 import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.DefaultLoadControl
+import androidx.media3.exoplayer.DefaultRenderersFactory
+import androidx.media3.exoplayer.mediacodec.MediaCodecSelector
+import androidx.media3.common.util.UnstableApi
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import kotlinx.coroutines.Dispatchers
@@ -59,6 +67,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) { super.onCreate(savedInstanceState); setContent { IPTVPlusApp() } }
 }
 
+@OptIn(UnstableApi::class)
 @Composable
 private fun IPTVPlusApp() {
     val context = LocalContext.current
@@ -74,20 +83,44 @@ private fun IPTVPlusApp() {
     var epgUrl by remember { mutableStateOf("") }
     var status by remember { mutableStateOf("Adiciona uma lista IPTV autorizada para começar.") }
     var loading by remember { mutableStateOf(false) }
-    val channels = remember { mutableStateListOf<TvItem>() }
+    var vodLoaded by remember { mutableStateOf(false) }
+    var seriesLoaded by remember { mutableStateOf(false) }
+    var homePreviewLoaded by remember { mutableStateOf(false) }
+    val maxLiveChannels = 5000 // limite de segurança para listas muito grandes
+    val homeMovies = remember { mutableStateListOf<TvItem>() }
+    val homeSeries = remember { mutableStateListOf<TvItem>() }
+    var channels by remember { mutableStateOf<List<TvItem>>(emptyList()) }
     val programmes = remember { mutableStateListOf<Programme>() }
     var selected by remember { mutableStateOf<TvItem?>(null) }
     var filter by remember { mutableStateOf("") }
     var category by remember { mutableStateOf("Todos") }
     var favoritesOnly by remember { mutableStateOf(false) }
     var fullscreen by remember { mutableStateOf(false) }
+    var bufferSetting by remember { mutableStateOf("10") }
+    var decoderMode by remember { mutableStateOf("auto") }
     var selectedSeries by remember { mutableStateOf<TvItem?>(null) }
     val movies = remember { mutableStateListOf<TvItem>() }
     val series = remember { mutableStateListOf<TvItem>() }
     val episodes = remember { mutableStateListOf<TvItem>() }
     val favorites = remember { mutableStateListOf<String>() }
-    val exoPlayer = remember { ExoPlayer.Builder(context).build() }
-    DisposableEffect(Unit) { onDispose { exoPlayer.release() } }
+    val exoPlayer = remember(context, bufferSetting, decoderMode) {
+        val (minBufferMs, maxBufferMs) = when (bufferSetting) {
+            "5" -> 5_000 to 15_000
+            "20" -> 20_000 to 50_000
+            "30" -> 30_000 to 60_000
+            else -> 10_000 to 30_000
+        }
+        val loadControl = DefaultLoadControl.Builder()
+            .setBufferDurationsMs(minBufferMs, maxBufferMs, 1_500, 3_000)
+            .build()
+        val renderersFactory = DefaultRenderersFactory(context)
+            .setEnableDecoderFallback(true)
+            .setMediaCodecSelector(if (decoderMode == "software") MediaCodecSelector.PREFER_SOFTWARE else MediaCodecSelector.DEFAULT)
+        ExoPlayer.Builder(context, renderersFactory)
+            .setLoadControl(loadControl)
+            .build()
+    }
+    DisposableEffect(exoPlayer) { onDispose { exoPlayer.release() } }
     val accent = accents[accentIndex]
     LaunchedEffect(fullscreen) {
         val activity = context as? Activity
@@ -112,15 +145,36 @@ private fun IPTVPlusApp() {
     }
     fun loadM3u() = launchLoad {
         val parsed = withContext(Dispatchers.IO) { IptvData.loadM3u(playlistUrl) }
-        channels.clear(); channels.addAll(parsed); status = "Lista carregada: ${parsed.size} canais."; page = "TV em direto"
+        channels = parsed; status = "Lista carregada: ${parsed.size} canais."; page = "TV em direto"
     }
     fun loadXtream() = launchLoad {
-        val data = withContext(Dispatchers.IO) { IptvData.loadXtreamCatalog(server, username, password) }
-        channels.clear(); channels.addAll(data.first)
-        movies.clear(); movies.addAll(data.second)
-        series.clear(); series.addAll(data.third)
-        status = "Xtream Codes: ${channels.size} canais, ${movies.size} filmes e ${series.size} séries carregados."
+        val found = withContext(Dispatchers.IO) { IptvData.loadXtreamLive(server, username, password, maxLiveChannels) }
+        channels = found
+        movies.clear(); series.clear(); homeMovies.clear(); homeSeries.clear(); vodLoaded = false; seriesLoaded = false; homePreviewLoaded = false
+        status = "Xtream Codes: ${channels.size} canais carregados. Filmes e séries serão carregados apenas quando abrires essas secções."
         page = "Início"
+    }
+    LaunchedEffect(page, server, username, password, channels.size, loading) {
+        if (page == "Início" && channels.isNotEmpty() && server.isNotBlank() && username.isNotBlank() && password.isNotBlank() && !homePreviewLoaded && !loading) launchLoad {
+            val previews = withContext(Dispatchers.IO) { IptvData.loadXtreamHomePreview(server, username, password, 18) }
+            homeMovies.clear(); homeMovies.addAll(previews.first)
+            homeSeries.clear(); homeSeries.addAll(previews.second)
+            homePreviewLoaded = true
+        }
+    }
+    LaunchedEffect(page, server, username, password) {
+        if (server.isNotBlank() && username.isNotBlank() && password.isNotBlank()) {
+            if (page == "Filmes" && !vodLoaded && !loading) launchLoad {
+                val found = withContext(Dispatchers.IO) { IptvData.loadVodCatalog(server, username, password) }
+                movies.clear(); movies.addAll(found); vodLoaded = true
+                status = "Filmes carregados: ${movies.size}."
+            }
+            if (page == "Séries" && !seriesLoaded && !loading) launchLoad {
+                val found = withContext(Dispatchers.IO) { IptvData.loadSeriesCatalog(server, username, password) }
+                series.clear(); series.addAll(found); seriesLoaded = true
+                status = "Séries carregadas: ${series.size}."
+            }
+        }
     }
     fun loadEpg() = launchLoad {
         val result = withContext(Dispatchers.IO) { IptvData.loadXmltv(epgUrl) }
@@ -155,22 +209,36 @@ private fun IPTVPlusApp() {
                     }
                     if (!fullscreen) Spacer(Modifier.height(12.dp))
                     when (page) {
-                        "Início" -> Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                            Surface(shape = RoundedCornerShape(22.dp), color = panel, modifier = Modifier.fillMaxWidth()) { Column(Modifier.padding(20.dp)) {
-                                Text("A tua televisão, à tua maneira", fontSize = if (isTv) 26.sp else 21.sp, fontWeight = FontWeight.Bold)
-                                Spacer(Modifier.height(8.dp)); Text("Importa uma lista M3U ou liga-te através de Xtream Codes.", color = muted)
-                                Spacer(Modifier.height(16.dp)); Button(onClick = { page = "Listas" }, colors = ButtonDefaults.buttonColors(containerColor = accent)) { Icon(Icons.Default.AddLink, null); Spacer(Modifier.width(8.dp)); Text("Adicionar lista") }
-                            } }
-                            Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
-                                StatCard("Canais", channels.size.toString(), Modifier.weight(1f), accent)
-                                StatCard("EPG", programmes.size.toString(), Modifier.weight(1f), accent)
+                        "Início" -> Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(20.dp)) {
+                            if (channels.isEmpty()) {
+                                Surface(shape = RoundedCornerShape(22.dp), color = panel, modifier = Modifier.fillMaxWidth()) { Column(Modifier.padding(20.dp)) {
+                                    Text("A tua televisão, à tua maneira", fontSize = if (isTv) 26.sp else 21.sp, fontWeight = FontWeight.Bold)
+                                    Spacer(Modifier.height(8.dp)); Text("Importa uma lista M3U ou liga-te através de Xtream Codes para veres canais, filmes e séries.", color = muted)
+                                    Spacer(Modifier.height(16.dp)); Button(onClick = { page = "Listas" }, colors = ButtonDefaults.buttonColors(containerColor = accent)) { Icon(Icons.Default.AddLink, null); Spacer(Modifier.width(8.dp)); Text("Adicionar lista") }
+                                } }
+                            } else {
+                                Surface(shape = RoundedCornerShape(22.dp), color = panel, modifier = Modifier.fillMaxWidth()) { Row(Modifier.fillMaxWidth().padding(18.dp), verticalAlignment = Alignment.CenterVertically) {
+                                    Column(Modifier.weight(1f)) { Text("A tua biblioteca", fontSize = if (isTv) 25.sp else 21.sp, fontWeight = FontWeight.Bold); Spacer(Modifier.height(5.dp)); Text("${channels.size} canais disponíveis", color = muted); Text("Descobre filmes e séries da tua lista", color = muted, fontSize = 13.sp) }
+                                    Button(onClick = { page = "Listas" }, colors = ButtonDefaults.buttonColors(containerColor = accent)) { Icon(Icons.Default.Settings, null); Spacer(Modifier.width(5.dp)); Text("Listas") }
+                                } }
+                                if (homeMovies.isNotEmpty()) PosterRail("Filmes em destaque", homeMovies, accent, isTv) { play(it) }
+                                else if (movies.isNotEmpty()) PosterRail("Filmes", movies.take(18), accent, isTv) { play(it) }
+                                else if (!homePreviewLoaded && server.isNotBlank()) Text("A preparar capas de filmes…", color = muted, fontSize = 13.sp)
+                                else if (homePreviewLoaded && homeMovies.isEmpty()) Text("Não foram encontradas capas de filmes nesta lista.", color = muted, fontSize = 13.sp)
+                                if (homeSeries.isNotEmpty()) PosterRail("Séries", homeSeries, accent, isTv) { openSeries(it) }
+                                else if (series.isNotEmpty()) PosterRail("Séries", series.take(18), accent, isTv) { openSeries(it) }
+                                else if (homePreviewLoaded && homeSeries.isEmpty()) Text("Não foram encontradas séries nesta lista.", color = muted, fontSize = 13.sp)
+                                Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
+                                    StatCard("Canais", channels.size.toString(), Modifier.weight(1f), accent)
+                                    StatCard("Filmes", if (vodLoaded) movies.size.toString() else "Ver", Modifier.weight(1f), accent)
+                                    StatCard("Séries", if (seriesLoaded) series.size.toString() else "Ver", Modifier.weight(1f), accent)
+                                }
+                                Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
+                                    Button(onClick = { page = "TV em direto" }, modifier = Modifier.weight(1f), colors = ButtonDefaults.buttonColors(containerColor = accent)) { Icon(Icons.Default.LiveTv, null); Spacer(Modifier.width(5.dp)); Text("Ver TV") }
+                                    OutlinedButton(onClick = { page = "Filmes" }, modifier = Modifier.weight(1f)) { Icon(Icons.Default.Movie, null); Spacer(Modifier.width(5.dp)); Text("Todos os filmes") }
+                                }
                             }
-                            Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
-                                Button(onClick = { page = "Filmes" }, modifier = Modifier.weight(1f), colors = ButtonDefaults.buttonColors(containerColor = accent)) { Icon(Icons.Default.Movie, null); Spacer(Modifier.width(6.dp)); Text("Filmes ${movies.size}") }
-                                Button(onClick = { page = "Séries" }, modifier = Modifier.weight(1f), colors = ButtonDefaults.buttonColors(containerColor = accent)) { Icon(Icons.Default.Tv, null); Spacer(Modifier.width(6.dp)); Text("Séries ${series.size}") }
-                            }
-                            Text(status, color = muted, fontSize = 13.sp)
-                            if (selected != null) Button(onClick = { page = "Leitor" }) { Icon(Icons.Default.PlayArrow, null); Text("Continuar: ${selected!!.name}") }
+                            Text(status, color = muted, fontSize = 12.sp)
                         }
                         "Listas" -> Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                             Text("Adicionar origem", fontSize = 19.sp, fontWeight = FontWeight.SemiBold)
@@ -201,32 +269,21 @@ private fun IPTVPlusApp() {
                             }
                             if (channels.isEmpty()) EmptyPanel("Ainda não há canais", "Vai a Mais → Listas para importar uma lista M3U ou ligar Xtream Codes.", accent)
                             else {
-                                val groups = channels.map { it.group.ifBlank { "Geral" } }.distinct().sorted()
+                                val groupCounts = remember(channels.size) { channels.groupingBy { it.group.ifBlank { "Geral" } }.eachCount().toSortedMap() }
                                 Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(vertical = 10.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                     FilterChip(selected = category == "Todos", onClick = { category = "Todos" }, label = { Text("Todos (${channels.size})") })
-                                    groups.forEach { groupName ->
-                                        val count = channels.count { it.group.ifBlank { "Geral" } == groupName }
+                                    groupCounts.forEach { (groupName, count) ->
                                         FilterChip(selected = category == groupName, onClick = { category = groupName }, label = { Text("$groupName ($count)", maxLines = 1) })
                                     }
                                 }
-                                val filtered = channels.filter { it.name.contains(filter, true) && (!favoritesOnly || it.url in favorites) && (category == "Todos" || it.group.ifBlank { "Geral" } == category) }
-                                if (filtered.isEmpty()) EmptyPanel("Sem resultados", "Altera a categoria ou a pesquisa.", accent)
-                                else LazyColumn(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                                    if (category == "Todos") {
-                                        filtered.groupBy { it.group.ifBlank { "Geral" } }.toSortedMap().forEach { (groupName, groupItems) ->
-                                            item(key = "group_$groupName") {
-                                                Row(Modifier.fillMaxWidth().padding(top = 12.dp, bottom = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-                                                    Text(groupName, color = accent, fontWeight = FontWeight.Bold, fontSize = 15.sp)
-                                                    Spacer(Modifier.width(8.dp))
-                                                    Text("${groupItems.size} canais", color = muted, fontSize = 12.sp)
-                                                }
-                                            }
-                                            items(groupItems, key = { it.url }) { item -> ChannelRow(item, accent, muted, panel, favorites) { play(item) } }
-                                        }
-                                    } else {
-                                        items(filtered, key = { it.url }) { item -> ChannelRow(item, accent, muted, panel, favorites) { play(item) } }
-                                    }
+                                val visibleChannels = remember(channels, filter, favoritesOnly, category, favorites.toList()) {
+                                    channels.filter { it.name.contains(filter, true) && (!favoritesOnly || it.url in favorites) && (category == "Todos" || it.group.ifBlank { "Geral" } == category) }
                                 }
+                                if (visibleChannels.isEmpty()) EmptyPanel("Sem resultados", "Altera a categoria ou a pesquisa.", accent)
+                                else LazyColumn(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                    items(visibleChannels, key = { it.url }) { item -> ChannelRow(item, accent, muted, panel, favorites) { play(item) } }
+                                }
+                                if (channels.size >= maxLiveChannels) Text("Por segurança, são apresentados no máximo $maxLiveChannels canais desta lista. Podes pesquisar e filtrar por categoria.", color = muted, fontSize = 12.sp, modifier = Modifier.padding(vertical = 6.dp))
                             }
                         }
                         "Mais" -> Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -256,9 +313,28 @@ private fun IPTVPlusApp() {
                             }
                         }
                         "Definições" -> Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                            Text("Leitor de vídeo", fontSize = 20.sp, fontWeight = FontWeight.Bold)
+                            Text("Tamanho do buffer", fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                            Text("Mais buffer pode reduzir interrupções, mas aumenta o tempo inicial de carregamento.", color = muted, fontSize = 12.sp)
+                            listOf("5" to "5 segundos — ligação rápida", "10" to "10 segundos — equilibrado", "20" to "20 segundos — ligação instável", "30" to "30 segundos — buffer elevado").forEach { (value, label) ->
+                                Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(panel).clickable { bufferSetting = value }.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                                    Column(Modifier.weight(1f)) { Text(label, fontWeight = FontWeight.Medium); Text(if (bufferSetting == value) "Selecionado" else "", color = accent, fontSize = 11.sp) }
+                                    RadioButton(selected = bufferSetting == value, onClick = { bufferSetting = value })
+                                }
+                            }
+                            HorizontalDivider(color = muted.copy(alpha=.2f))
+                            Text("Descodificação de vídeo", fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                            Text("A alteração recria o leitor e aplica-se à próxima reprodução.", color = muted, fontSize = 12.sp)
+                            listOf("auto" to "Automático / hardware preferido", "software" to "Software preferido").forEach { (value, label) ->
+                                Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(panel).clickable { decoderMode = value }.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                                    Column(Modifier.weight(1f)) { Text(label, fontWeight = FontWeight.Medium); Text(if (value == "software") "Pode usar mais CPU e bateria" else "Recomendado para a maioria dos dispositivos", color = muted, fontSize = 11.sp) }
+                                    RadioButton(selected = decoderMode == value, onClick = { decoderMode = value })
+                                }
+                            }
+                            HorizontalDivider(color = muted.copy(alpha=.2f))
                             Text("Cor de destaque", fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
                             accents.forEachIndexed { index, color -> Row(Modifier.fillMaxWidth().clickable { accentIndex = index }.padding(vertical = 5.dp), verticalAlignment = Alignment.CenterVertically) { Box(Modifier.size(28.dp).background(color, RoundedCornerShape(50))); Spacer(Modifier.width(12.dp)); Text(listOf("Violeta", "Ciano", "Menta", "Rosa", "Âmbar", "Azul", "Lilás", "Magenta")[index], Modifier.weight(1f)); if (accentIndex == index) Icon(Icons.Default.CheckCircle, null, tint = color) } }
-                            HorizontalDivider(color = muted.copy(alpha=.2f)); Text("Sobre o IPTV+", fontWeight = FontWeight.SemiBold); Text("Versão 0.3.1 • Filmes, séries e leitor em ecrã inteiro • Interface adaptativa para smartphone e Android TV", color = muted); Text("Compatibilidade de reprodução depende do formato do stream e das permissões do fornecedor.", color = muted, fontSize = 12.sp)
+                            HorizontalDivider(color = muted.copy(alpha=.2f)); Text("Sobre o IPTV+", fontWeight = FontWeight.SemiBold); Text("Versão 0.3.5 • Buffer configurável, descodificação e leitor em ecrã inteiro • Interface adaptativa para smartphone e Android TV", color = muted); Text("Compatibilidade de reprodução depende do formato do stream e das permissões do fornecedor.", color = muted, fontSize = 12.sp)
                         }
                     }
                 }
@@ -291,17 +367,42 @@ private fun MoreMenuRow(title: String, subtitle: String, icon: androidx.compose.
     }
 }
 
+@Composable private fun PosterRail(title: String, items: List<TvItem>, accent: Color, isTv: Boolean, onSelect: (TvItem) -> Unit) {
+    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        Text(title, fontSize = if (isTv) 21.sp else 18.sp, fontWeight = FontWeight.Bold)
+        androidx.compose.foundation.lazy.LazyRow(horizontalArrangement = Arrangement.spacedBy(12.dp), contentPadding = PaddingValues(end = 8.dp)) {
+            items(items.take(24), key = { "poster_${it.kind}_${it.id}_${it.name}" }) { item ->
+                Column(Modifier.width(if (isTv) 150.dp else 118.dp).clickable { onSelect(item) }, verticalArrangement = Arrangement.spacedBy(7.dp)) {
+                    Surface(shape = RoundedCornerShape(12.dp), color = panel, modifier = Modifier.fillMaxWidth().height(if (isTv) 220.dp else 172.dp)) {
+                        Box {
+                            if (item.logo.isNotBlank()) AsyncImage(model = item.logo, contentDescription = item.name, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
+                            else Column(Modifier.fillMaxSize().padding(8.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
+                                Icon(if (item.kind == "series") Icons.Default.Tv else Icons.Default.Movie, null, tint = accent, modifier = Modifier.size(32.dp))
+                                Spacer(Modifier.height(8.dp)); Text(item.name, color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, maxLines = 3)
+                            }
+                            if (item.logo.isNotBlank()) Box(Modifier.align(Alignment.BottomStart).fillMaxWidth().background(Color.Black.copy(alpha = .68f)).padding(horizontal = 7.dp, vertical = 6.dp)) { Text(item.name, color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.SemiBold, maxLines = 2) }
+                        }
+                    }
+                    if (item.group.isNotBlank()) Text(item.group, color = muted, fontSize = 10.sp, maxLines = 1)
+                }
+            }
+        }
+    }
+}
+
 @Composable private fun MediaLibraryPage(title:String, mediaItems:List<TvItem>, filter:String, onFilter:(String)->Unit, accent:Color, emptyHint:String, onSelect:(TvItem)->Unit) {
     Column(Modifier.fillMaxSize()) {
         OutlinedTextField(value=filter, onValueChange=onFilter, label={ Text("Pesquisar $title") }, leadingIcon={ Icon(Icons.Default.Search, null) }, singleLine=true, modifier=Modifier.fillMaxWidth())
         Spacer(Modifier.height(10.dp))
         if (mediaItems.isEmpty()) EmptyPanel("$title ainda não carregados", emptyHint, accent)
         else LazyColumn(verticalArrangement=Arrangement.spacedBy(8.dp)) {
-            items(mediaItems.filter { it.name.contains(filter, ignoreCase=true) || it.group.contains(filter, ignoreCase=true) }) { item ->
-                Row(Modifier.fillMaxWidth().background(panel, RoundedCornerShape(12.dp)).clickable { onSelect(item) }.padding(14.dp), verticalAlignment=Alignment.CenterVertically) {
-                    Icon(if (item.kind == "series") Icons.Default.Tv else Icons.Default.Movie, null, tint=accent)
-                    Spacer(Modifier.width(12.dp)); Column(Modifier.weight(1f)) { Text(item.name, fontWeight=FontWeight.SemiBold); Text(item.group, color=muted, fontSize=12.sp) }
-                    Icon(Icons.Default.PlayArrow, null, tint=accent)
+            items(mediaItems, key = { "${it.kind}_${it.id}" }) { item ->
+                if (item.name.contains(filter, ignoreCase=true) || item.group.contains(filter, ignoreCase=true)) {
+                    Row(Modifier.fillMaxWidth().background(panel, RoundedCornerShape(12.dp)).clickable { onSelect(item) }.padding(14.dp), verticalAlignment=Alignment.CenterVertically) {
+                        Icon(if (item.kind == "series") Icons.Default.Tv else Icons.Default.Movie, null, tint=accent)
+                        Spacer(Modifier.width(12.dp)); Column(Modifier.weight(1f)) { Text(item.name, fontWeight=FontWeight.SemiBold); Text(item.group, color=muted, fontSize=12.sp) }
+                        Icon(Icons.Default.PlayArrow, null, tint=accent)
+                    }
                 }
             }
         }
@@ -335,30 +436,102 @@ private object IptvData {
         require(!auth.contains("\"auth\":0") && !auth.contains("\"auth\": false")) { "Credenciais Xtream Codes inválidas" }
         return XtreamCredentials(base,u,p)
     }
-    private fun categoryMap(json: String): Map<String, String> {
-        val array = org.json.JSONArray(json)
-        val result = mutableMapOf<String, String>()
-        for (i in 0 until array.length()) {
-            val item = array.optJSONObject(i) ?: continue
-            val id = item.optString("category_id")
-            val name = item.optString("category_name")
-            if (id.isNotBlank() && name.isNotBlank()) result[id] = name
-        }
+    private fun openJsonReader(url: String): Pair<HttpURLConnection, JsonReader> {
+        require(url.startsWith("http://", true) || url.startsWith("https://", true)) { "O URL tem de começar por http:// ou https://" }
+        val conn = URL(url).openConnection() as HttpURLConnection
+        conn.connectTimeout = 20000
+        conn.readTimeout = 60000
+        conn.setRequestProperty("User-Agent", "IPTVPlus/0.3.4 Android")
+        conn.setRequestProperty("Accept-Encoding", "identity")
+        if (conn.responseCode !in 200..299) { val code = conn.responseCode; conn.disconnect(); error("HTTP $code ao consultar o fornecedor") }
+        return conn to JsonReader(conn.inputStream.bufferedReader(Charsets.UTF_8))
+    }
+    private fun JsonReader.readJsonScalar(): String = when (peek()) {
+        JsonToken.NULL -> { nextNull(); "" }
+        JsonToken.STRING, JsonToken.NUMBER -> nextString()
+        JsonToken.BOOLEAN -> nextBoolean().toString()
+        else -> { skipValue(); "" }
+    }
+    private fun readCategoryMap(url: String): Map<String, String> {
+        val (conn, reader) = openJsonReader(url)
+        val result = HashMap<String, String>()
+        try {
+            reader.beginArray()
+            while (reader.hasNext()) {
+                var id = ""; var name = ""
+                reader.beginObject()
+                while (reader.hasNext()) {
+                    when (reader.nextName()) {
+                        "category_id" -> id = reader.readJsonScalar()
+                        "category_name" -> name = reader.readJsonScalar()
+                        else -> reader.skipValue()
+                    }
+                }
+                reader.endObject()
+                if (id.isNotBlank() && name.isNotBlank()) result[id] = name
+            }
+            reader.endArray()
+        } finally { reader.close(); conn.disconnect() }
         return result
     }
-    fun loadXtreamCatalog(server:String, user:String, pass:String): Triple<List<TvItem>,List<TvItem>,List<TvItem>> {
-        val c = credentials(server,user,pass)
-        val liveCategories = categoryMap(fetch("${c.base}/player_api.php?username=${c.user}&password=${c.pass}&action=get_live_categories"))
-        val vodCategories = categoryMap(fetch("${c.base}/player_api.php?username=${c.user}&password=${c.pass}&action=get_vod_categories"))
-        val seriesCategories = categoryMap(fetch("${c.base}/player_api.php?username=${c.user}&password=${c.pass}&action=get_series_categories"))
-        val live = org.json.JSONArray(fetch("${c.base}/player_api.php?username=${c.user}&password=${c.pass}&action=get_live_streams"))
-        val vod = org.json.JSONArray(fetch("${c.base}/player_api.php?username=${c.user}&password=${c.pass}&action=get_vod_streams"))
-        val seriesJson = org.json.JSONArray(fetch("${c.base}/player_api.php?username=${c.user}&password=${c.pass}&action=get_series"))
-        val channels = mutableListOf<TvItem>(); val movies = mutableListOf<TvItem>(); val series = mutableListOf<TvItem>()
-        for (i in 0 until live.length()) { val o=live.getJSONObject(i); val id=o.optString("stream_id"); if(id.isNotBlank()) { val cat=o.optString("category_id"); val group=o.optString("category_name").ifBlank { liveCategories[cat] ?: "TV em direto" }; channels.add(TvItem(o.optString("name","Canal $id"), "${c.base}/live/${c.user}/${c.pass}/$id.ts", group, o.optString("stream_icon"), "live", id)) } }
-        for (i in 0 until vod.length()) { val o=vod.getJSONObject(i); val id=o.optString("stream_id"); if(id.isNotBlank()) { val ext=o.optString("container_extension","mp4").ifBlank { "mp4" }; val cat=o.optString("category_id"); val group=o.optString("category_name").ifBlank { vodCategories[cat] ?: "Filmes" }; movies.add(TvItem(o.optString("name","Filme $id"), "${c.base}/movie/${c.user}/${c.pass}/$id.$ext", group, o.optString("stream_icon"), "movie", id, ext)) } }
-        for (i in 0 until seriesJson.length()) { val o=seriesJson.getJSONObject(i); val id=o.optString("series_id"); if(id.isNotBlank()) { val cat=o.optString("category_id"); val group=o.optString("category_name").ifBlank { seriesCategories[cat] ?: "Séries" }; series.add(TvItem(o.optString("name","Série $id"), "", group, o.optString("cover"), "series", id)) } }
-        return Triple(channels,movies,series)
+    private fun streamCatalog(url: String, kind: String, base: String, user: String, pass: String, categories: Map<String, String>, limit: Int = Int.MAX_VALUE): List<TvItem> {
+        val (conn, reader) = openJsonReader(url)
+        val out = ArrayList<TvItem>()
+        try {
+            reader.beginArray()
+            while (reader.hasNext()) {
+                var id = ""; var name = ""; var categoryId = ""; var categoryName = ""; var icon = ""; var extension = "mp4"
+                reader.beginObject()
+                while (reader.hasNext()) {
+                    when (reader.nextName()) {
+                        "stream_id", "series_id" -> id = reader.readJsonScalar()
+                        "name" -> name = reader.readJsonScalar()
+                        "category_id" -> categoryId = reader.readJsonScalar()
+                        "category_name" -> categoryName = reader.readJsonScalar()
+                        "stream_icon", "cover" -> icon = reader.readJsonScalar()
+                        "container_extension" -> extension = reader.readJsonScalar().ifBlank { "mp4" }
+                        else -> reader.skipValue()
+                    }
+                }
+                reader.endObject()
+                if (id.isNotBlank()) {
+                    val group = categoryName.ifBlank { categories[categoryId] ?: when (kind) { "live" -> "TV em direto"; "movie" -> "Filmes"; else -> "Séries" } }
+                    val urlItem = when (kind) {
+                        "live" -> "$base/live/$user/$pass/$id.ts"
+                        "movie" -> "$base/movie/$user/$pass/$id.$extension"
+                        else -> ""
+                    }
+                    out.add(TvItem(name.ifBlank { if (kind == "live") "Canal $id" else if (kind == "movie") "Filme $id" else "Série $id" }, urlItem, group, icon, kind, id, extension))
+                }
+                if (out.size >= limit) break
+            }
+            reader.endArray()
+        } finally { reader.close(); conn.disconnect() }
+        return out
+    }
+    private fun authenticated(server: String, user: String, pass: String): XtreamCredentials = credentials(server, user, pass)
+    fun loadXtreamHomePreview(server: String, user: String, pass: String, limit: Int): Pair<List<TvItem>, List<TvItem>> {
+        val c = authenticated(server, user, pass)
+        val movieCats = readCategoryMap("${c.base}/player_api.php?username=${c.user}&password=${c.pass}&action=get_vod_categories")
+        val movieItems = streamCatalog("${c.base}/player_api.php?username=${c.user}&password=${c.pass}&action=get_vod_streams", "movie", c.base, c.user, c.pass, movieCats, limit)
+        val seriesCats = readCategoryMap("${c.base}/player_api.php?username=${c.user}&password=${c.pass}&action=get_series_categories")
+        val seriesItems = streamCatalog("${c.base}/player_api.php?username=${c.user}&password=${c.pass}&action=get_series", "series", c.base, c.user, c.pass, seriesCats, limit)
+        return movieItems to seriesItems
+    }
+    fun loadXtreamLive(server: String, user: String, pass: String, limit: Int): List<TvItem> {
+        val c = authenticated(server, user, pass)
+        val cats = readCategoryMap("${c.base}/player_api.php?username=${c.user}&password=${c.pass}&action=get_live_categories")
+        return streamCatalog("${c.base}/player_api.php?username=${c.user}&password=${c.pass}&action=get_live_streams", "live", c.base, c.user, c.pass, cats, limit)
+    }
+    fun loadVodCatalog(server: String, user: String, pass: String): List<TvItem> {
+        val c = authenticated(server, user, pass)
+        val cats = readCategoryMap("${c.base}/player_api.php?username=${c.user}&password=${c.pass}&action=get_vod_categories")
+        return streamCatalog("${c.base}/player_api.php?username=${c.user}&password=${c.pass}&action=get_vod_streams", "movie", c.base, c.user, c.pass, cats)
+    }
+    fun loadSeriesCatalog(server: String, user: String, pass: String): List<TvItem> {
+        val c = authenticated(server, user, pass)
+        val cats = readCategoryMap("${c.base}/player_api.php?username=${c.user}&password=${c.pass}&action=get_series_categories")
+        return streamCatalog("${c.base}/player_api.php?username=${c.user}&password=${c.pass}&action=get_series", "series", c.base, c.user, c.pass, cats)
     }
     fun loadSeriesEpisodes(server:String,user:String,pass:String,seriesId:String):List<TvItem> {
         val c=credentials(server,user,pass)
