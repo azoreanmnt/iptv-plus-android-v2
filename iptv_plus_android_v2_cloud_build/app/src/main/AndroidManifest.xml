@@ -1,0 +1,10 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-feature android:name="android.software.leanback" android:required="false" />
+    <application android:allowBackup="false" android:label="IPTV+" android:icon="@drawable/ic_iptv_plus" android:roundIcon="@drawable/ic_iptv_plus" android:theme="@style/AppTheme" android:usesCleartextTraffic="true">
+        <activity android:name=".MainActivity" android:exported="true" android:configChanges="orientation|screenSize|keyboardHidden">
+            <intent-filter><action android:name="android.intent.action.MAIN" /><category android:name="android.intent.category.LAUNCHER" /></intent-filter>
+            <intent-filter><action android:name="android.intent.action.MAIN" /><category android:name="android.intent.category.LEANBACK_LAUNCHER" /></intent-filter>
+        </activity>
+    </application>
+</manifest>
