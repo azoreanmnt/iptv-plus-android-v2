@@ -136,7 +136,7 @@ private fun IPTVPlusApp() {
     var autoPlayNext by remember { mutableStateOf(prefs.getBoolean("auto_play_next", true)) }
     var openSubtitleSearch by remember { mutableStateOf(false) }
     var subtitleQuery by remember { mutableStateOf("") }
-    var subtitleLanguage by remember { mutableStateOf("pt,en") }
+    var subtitleLanguage by remember { mutableStateOf(prefs.getString("subtitle_language", "pt,en") ?: "pt,en") }
     var subtitleLoading by remember { mutableStateOf(false) }
     var subtitleStatus by remember { mutableStateOf("") }
     var subtitleResults by remember { mutableStateOf<List<OnlineSubtitle>>(emptyList()) }
@@ -147,7 +147,18 @@ private fun IPTVPlusApp() {
     val movies = remember { mutableStateListOf<TvItem>() }
     val series = remember { mutableStateListOf<TvItem>() }
     val episodes = remember { mutableStateListOf<TvItem>() }
-    val favorites = remember { mutableStateListOf<String>() }
+    val favorites = remember { mutableStateListOf<String>().apply {
+        try { addAll(JSONArray(prefs.getString("favorites_json", "[]") ?: "[]").let { arr -> (0 until arr.length()).map { arr.getString(it) } }) } catch (_: Exception) {}
+    } }
+    val recentChannels = remember { mutableStateListOf<TvItem>().apply {
+        try {
+            val arr = JSONArray(prefs.getString("recent_channels_json", "[]") ?: "[]")
+            for (i in 0 until arr.length()) {
+                val o = arr.getJSONObject(i)
+                add(TvItem(o.optString("name"), o.optString("url"), o.optString("group", "Geral"), o.optString("logo"), "live", o.optString("id"), o.optString("extension", "mp4")))
+            }
+        } catch (_: Exception) {}
+    } }
     val exoPlayer = remember(context, bufferSetting, decoderMode) {
         val (minBufferMs, maxBufferMs) = when (bufferSetting) {
             "5" -> 5_000 to 15_000
@@ -167,7 +178,7 @@ private fun IPTVPlusApp() {
     }
     DisposableEffect(exoPlayer) { onDispose { exoPlayer.release() } }
     val accent = accents[accentIndex]
-    LaunchedEffect(bufferSetting, decoderMode, pipEnabled, keepScreenOn, startPage, autoFullscreen, autoPlayNext) {
+    LaunchedEffect(bufferSetting, decoderMode, pipEnabled, keepScreenOn, startPage, autoFullscreen, autoPlayNext, accentIndex, openSubtitleApiKey, openSubtitleUser, openSubtitlePassword, subtitleLanguage, page, favorites.toList(), recentChannels.toList()) {
         prefs.edit()
             .putString("buffer_setting", bufferSetting)
             .putString("decoder_mode", decoderMode)
@@ -181,6 +192,12 @@ private fun IPTVPlusApp() {
             .putString("opensubtitles_api_key", openSubtitleApiKey)
             .putString("opensubtitles_user", openSubtitleUser)
             .putString("opensubtitles_password", openSubtitlePassword)
+            .putString("subtitle_language", subtitleLanguage)
+            .putString("last_page", page)
+            .putString("favorites_json", JSONArray(favorites.toList()).toString())
+            .putString("recent_channels_json", JSONArray().apply {
+                recentChannels.forEach { item -> put(JSONObject().put("name", item.name).put("url", item.url).put("group", item.group).put("logo", item.logo).put("id", item.id).put("extension", item.extension)) }
+            }.toString())
             .apply()
     }
     LaunchedEffect(page, keepScreenOn) {
@@ -197,7 +214,14 @@ private fun IPTVPlusApp() {
         } else 0
     }
 
-    fun play(item: TvItem) { selected = item; exoPlayer.setMediaItem(MediaItem.fromUri(item.url)); exoPlayer.prepare(); exoPlayer.playWhenReady = true; page = "Leitor"; fullscreen = autoFullscreen }
+    fun play(item: TvItem) {
+        if (item.kind == "live") {
+            recentChannels.removeAll { it.url == item.url }
+            recentChannels.add(0, item)
+            while (recentChannels.size > 12) recentChannels.removeAt(recentChannels.lastIndex)
+        }
+        selected = item; exoPlayer.setMediaItem(MediaItem.fromUri(item.url)); exoPlayer.prepare(); exoPlayer.playWhenReady = true; page = "Leitor"; fullscreen = autoFullscreen
+    }
     fun launchLoad(block: suspend () -> Unit) {
         loading = true
         (context as? ComponentActivity)?.lifecycleScope?.launch {
@@ -357,10 +381,14 @@ private fun IPTVPlusApp() {
                                     Spacer(Modifier.height(16.dp)); Button(onClick = { page = "Listas" }, colors = ButtonDefaults.buttonColors(containerColor = accent)) { Icon(Icons.Default.AddLink, null); Spacer(Modifier.width(8.dp)); Text("Adicionar lista") }
                                 } }
                             } else {
-                                Surface(shape = RoundedCornerShape(22.dp), color = panel, modifier = Modifier.fillMaxWidth()) { Row(Modifier.fillMaxWidth().padding(18.dp), verticalAlignment = Alignment.CenterVertically) {
-                                    Column(Modifier.weight(1f)) { Text("A tua biblioteca", fontSize = if (isTv) 25.sp else 21.sp, fontWeight = FontWeight.Bold); Spacer(Modifier.height(5.dp)); Text("${channels.size} canais disponíveis", color = muted); Text("Descobre filmes e séries da tua lista", color = muted, fontSize = 13.sp) }
-                                    Button(onClick = { page = "Listas" }, colors = ButtonDefaults.buttonColors(containerColor = accent)) { Icon(Icons.Default.Settings, null); Spacer(Modifier.width(5.dp)); Text("Listas") }
-                                } }
+                                if (recentChannels.isNotEmpty()) PosterRail("Últimos canais reproduzidos", recentChannels, accent, isTv) { play(it) }
+                                else Surface(shape = RoundedCornerShape(18.dp), color = panel, modifier = Modifier.fillMaxWidth()) {
+                                    Row(Modifier.fillMaxWidth().clickable { page = "TV em direto" }.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+                                        Icon(Icons.Default.History, null, tint = accent, modifier = Modifier.size(30.dp)); Spacer(Modifier.width(12.dp))
+                                        Column(Modifier.weight(1f)) { Text("Últimos canais reproduzidos", fontWeight = FontWeight.Bold); Text("Os canais que vi aparecerão aqui", color = muted, fontSize = 13.sp) }
+                                        Icon(Icons.Default.ChevronRight, null, tint = muted)
+                                    }
+                                }
                                 if (homeMovies.isNotEmpty()) PosterRail("Filmes em destaque", homeMovies, accent, isTv) { play(it) }
                                 else if (movies.isNotEmpty()) PosterRail("Filmes", movies.take(18), accent, isTv) { play(it) }
                                 else if (!homePreviewLoaded && server.isNotBlank()) Text("A preparar capas de filmes…", color = muted, fontSize = 13.sp)
@@ -443,12 +471,22 @@ private fun IPTVPlusApp() {
                                 items(episodes) { ep -> Row(Modifier.fillMaxWidth().background(panel, RoundedCornerShape(12.dp)).clickable { play(ep) }.padding(14.dp), verticalAlignment = Alignment.CenterVertically) { Icon(Icons.Default.PlayCircle, null, tint = accent); Spacer(Modifier.width(10.dp)); Column(Modifier.weight(1f)) { Text(ep.name, fontWeight = FontWeight.SemiBold); Text(ep.group, color = muted, fontSize = 12.sp) }; Icon(Icons.Default.PlayArrow, null, tint = accent) } }
                             }
                         }
-                        "Leitor" -> Box(Modifier.fillMaxSize().background(Color.Black)) {
-                            AndroidView(factory = { ctx -> PlayerView(ctx).apply { player = exoPlayer; useController = true; resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT; setShowSubtitleButton(true) } }, modifier = if (fullscreen) Modifier.fillMaxSize() else Modifier.fillMaxWidth().height(if (isTv) 420.dp else 240.dp).align(Alignment.Center))
-                            if (fullscreen) IconButton(onClick = { fullscreen = false }, modifier = Modifier.align(Alignment.TopEnd).padding(12.dp)) { Icon(Icons.Default.FullscreenExit, "Sair de ecrã inteiro", tint = Color.White) }
-                            if (!fullscreen) Column(Modifier.align(Alignment.BottomCenter).fillMaxWidth().background(bg).padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        "Leitor" -> Column(Modifier.fillMaxSize().background(Color.Black)) {
+                            Box(Modifier.fillMaxWidth().then(if (fullscreen) Modifier.weight(1f) else Modifier.height(if (isTv) 420.dp else 250.dp))) {
+                                AndroidView(factory = { ctx -> PlayerView(ctx).apply {
+                                    player = exoPlayer
+                                    useController = true
+                                    controllerAutoShow = true
+                                    controllerShowTimeoutMs = 3500
+                                    resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
+                                    setShowSubtitleButton(true)
+                                    setShowBuffering(PlayerView.SHOW_BUFFERING_WHEN_PLAYING)
+                                } }, modifier = Modifier.fillMaxSize())
+                                if (fullscreen) IconButton(onClick = { fullscreen = false }, modifier = Modifier.align(Alignment.TopEnd).padding(8.dp)) { Icon(Icons.Default.FullscreenExit, "Sair de ecrã inteiro", tint = Color.White) }
+                            }
+                            if (!fullscreen) Column(Modifier.fillMaxWidth().background(bg).padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                                 Text(selected?.name ?: "Leitor integrado", color = Color.White, fontWeight = FontWeight.SemiBold)
-                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) { Button(onClick = { exoPlayer.play() }) { Icon(Icons.Default.PlayArrow, null); Text("Reproduzir") }; OutlinedButton(onClick = { exoPlayer.pause() }) { Icon(Icons.Default.Pause, null); Text("Pausa") }; OutlinedButton(onClick = { fullscreen = true }) { Icon(Icons.Default.Fullscreen, null); Text("Ecrã inteiro") } }
+                                OutlinedButton(onClick = { fullscreen = true }, modifier = Modifier.fillMaxWidth()) { Icon(Icons.Default.Fullscreen, null); Spacer(Modifier.width(8.dp)); Text("Ecrã inteiro") }
                                 OutlinedButton(onClick = { subtitleQuery = selected?.name ?: ""; subtitleResults = emptyList(); subtitleStatus = ""; openSubtitleSearch = true }, modifier = Modifier.fillMaxWidth()) { Icon(Icons.Default.Subtitles, null); Spacer(Modifier.width(8.dp)); Text("Procurar legendas online") }
                             }
                         }
@@ -496,7 +534,7 @@ private fun IPTVPlusApp() {
                             Text("Para uma futura publicação pública, é preferível transferir a autenticação para um serviço intermediário protegido em vez de guardar credenciais diretamente no dispositivo.", color = muted, fontSize = 12.sp)
                             HorizontalDivider(color = muted.copy(alpha=.2f))
                             Text("Sobre o IPTV+", fontWeight = FontWeight.SemiBold)
-                            Text("Versão 0.3.8 · Pesquisa e transferência de legendas online, além das preferências do player.", color = muted)
+                            Text("Versão 0.4.2 · Histórico de canais e preferências persistentes.", color = muted)
                             Text("O funcionamento de PiP depende do Android e do dispositivo. A opção de descodificação por software é experimental.", color = muted, fontSize = 12.sp)
                         }
                     }
@@ -616,12 +654,12 @@ private fun MoreMenuRow(title: String, subtitle: String, icon: androidx.compose.
         }
     }
     Column(Modifier.fillMaxSize()) {
-        OutlinedTextField(value=filter, onValueChange=onFilter, label={ Text("Pesquisar $title") }, leadingIcon={ Icon(Icons.Default.Search, null) }, singleLine=true, modifier=Modifier.fillMaxWidth())
+        OutlinedTextField(value=filter, onValueChange=onFilter, label={ Text("Pesquisar $title") }, leadingIcon={ Icon(Icons.Default.Search, null) }, singleLine=true, modifier=Modifier.fillMaxWidth().heightIn(max = 56.dp))
         if (mediaItems.isNotEmpty()) {
-            Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(vertical=10.dp), horizontalArrangement=Arrangement.spacedBy(8.dp)) {
-                FilterChip(selected=selectedCategory=="Todas", onClick={ selectedCategory="Todas" }, label={ Text("Todas (${mediaItems.size})") })
+            Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(vertical=12.dp), horizontalArrangement=Arrangement.spacedBy(8.dp)) {
+                FilterChip(selected=selectedCategory=="Todas", onClick={ selectedCategory="Todas" }, modifier=Modifier.heightIn(min=48.dp), label={ Text("Todas (${mediaItems.size})", fontSize=14.sp) })
                 categoryCounts.forEach { (groupName, count) ->
-                    FilterChip(selected=selectedCategory==groupName, onClick={ selectedCategory=groupName }, label={ Text("$groupName ($count)", maxLines=1) })
+                    FilterChip(selected=selectedCategory==groupName, onClick={ selectedCategory=groupName }, modifier=Modifier.heightIn(min=48.dp), label={ Text("$groupName ($count)", maxLines=1, fontSize=14.sp) })
                 }
             }
         }
