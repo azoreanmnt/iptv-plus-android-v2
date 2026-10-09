@@ -12,6 +12,9 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: iptv_plus_android_v2_cloud_build
     steps:
       - name: Checkout source
         uses: actions/checkout@v4
@@ -32,6 +35,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: IPTVPlus-debug-apk
-          path: app/build/outputs/apk/debug/app-debug.apk
+          path: iptv_plus_android_v2_cloud_build/app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
           retention-days: 14
