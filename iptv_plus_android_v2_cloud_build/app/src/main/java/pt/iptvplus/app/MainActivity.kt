@@ -115,7 +115,8 @@ private fun IPTVPlusApp() {
             .build()
         val renderersFactory = DefaultRenderersFactory(context)
             .setEnableDecoderFallback(true)
-            .setMediaCodecSelector(if (decoderMode == "software") MediaCodecSelector.PREFER_SOFTWARE else MediaCodecSelector.DEFAULT)
+            .setMediaCodecSelector(
+        MediaCodecSelector.DEFAULT)
         ExoPlayer.Builder(context, renderersFactory)
             .setLoadControl(loadControl)
             .build()
