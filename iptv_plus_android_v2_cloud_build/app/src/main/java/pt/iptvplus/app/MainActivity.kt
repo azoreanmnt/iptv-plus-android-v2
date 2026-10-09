@@ -41,6 +41,10 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.lifecycleScope
 import androidx.media3.common.MediaItem
+import androidx.media3.common.MimeTypes
+import org.json.JSONObject
+import org.json.JSONArray
+import java.io.File
 import coil.compose.AsyncImage
 import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
@@ -65,6 +69,7 @@ private val muted = Color(0xFF9BAAC2)
 private val accents = listOf(Color(0xFF7C5CFF), Color(0xFF24C8E8), Color(0xFF47E0C0), Color(0xFFFF6B8A), Color(0xFFFFB547), Color(0xFF4C8DFF), Color(0xFFB879FF), Color(0xFFFA6BCE))
 private data class TvItem(val name:String, val url:String, val group:String="Geral", val logo:String="", val kind:String="live", val id:String="", val extension:String="mp4")
 private data class Programme(val channel:String, val title:String, val start:String, val stop:String)
+private data class OnlineSubtitle(val fileId: Long, val language: String, val release: String, val downloads: Int)
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -98,12 +103,13 @@ private fun IPTVPlusApp() {
     val cfg = LocalConfiguration.current
     val isTv = cfg.uiMode and Configuration.UI_MODE_TYPE_MASK == Configuration.UI_MODE_TYPE_TELEVISION || cfg.screenWidthDp >= 800
     val prefs = remember { context.getSharedPreferences("iptv_plus_settings", android.content.Context.MODE_PRIVATE) }
+    val catalogDb = remember { CatalogDatabase(context.applicationContext) }
     var page by remember { mutableStateOf(prefs.getString("start_page", "Início") ?: "Início") }
     var accentIndex by remember { mutableIntStateOf(prefs.getInt("accent_index", 0).coerceIn(0, accents.lastIndex)) }
     var sourceType by remember { mutableStateOf("Xtream Codes") }
-    var server by remember { mutableStateOf("") }
-    var username by remember { mutableStateOf("") }
-    var password by remember { mutableStateOf("") }
+    var server by remember { mutableStateOf(prefs.getString("xtream_server", "") ?: "") }
+    var username by remember { mutableStateOf(prefs.getString("xtream_username", "") ?: "") }
+    var password by remember { mutableStateOf(prefs.getString("xtream_password", "") ?: "") }
     var playlistUrl by remember { mutableStateOf("") }
     var epgUrl by remember { mutableStateOf("") }
     var status by remember { mutableStateOf("Adiciona uma lista IPTV autorizada para começar.") }
@@ -111,7 +117,7 @@ private fun IPTVPlusApp() {
     var vodLoaded by remember { mutableStateOf(false) }
     var seriesLoaded by remember { mutableStateOf(false) }
     var homePreviewLoaded by remember { mutableStateOf(false) }
-    val maxLiveChannels = 5000 // limite de segurança para listas muito grandes
+    val maxLiveChannels = Int.MAX_VALUE // sem limite artificial; o JSON é lido em streaming
     val homeMovies = remember { mutableStateListOf<TvItem>() }
     val homeSeries = remember { mutableStateListOf<TvItem>() }
     var channels by remember { mutableStateOf<List<TvItem>>(emptyList()) }
@@ -128,6 +134,15 @@ private fun IPTVPlusApp() {
     var startPage by remember { mutableStateOf(prefs.getString("start_page", "Início") ?: "Início") }
     var autoFullscreen by remember { mutableStateOf(prefs.getBoolean("auto_fullscreen", false)) }
     var autoPlayNext by remember { mutableStateOf(prefs.getBoolean("auto_play_next", true)) }
+    var openSubtitleSearch by remember { mutableStateOf(false) }
+    var subtitleQuery by remember { mutableStateOf("") }
+    var subtitleLanguage by remember { mutableStateOf("pt,en") }
+    var subtitleLoading by remember { mutableStateOf(false) }
+    var subtitleStatus by remember { mutableStateOf("") }
+    var subtitleResults by remember { mutableStateOf<List<OnlineSubtitle>>(emptyList()) }
+    var openSubtitleApiKey by remember { mutableStateOf(prefs.getString("opensubtitles_api_key", "") ?: "") }
+    var openSubtitleUser by remember { mutableStateOf(prefs.getString("opensubtitles_user", "") ?: "") }
+    var openSubtitlePassword by remember { mutableStateOf(prefs.getString("opensubtitles_password", "") ?: "") }
     var selectedSeries by remember { mutableStateOf<TvItem?>(null) }
     val movies = remember { mutableStateListOf<TvItem>() }
     val series = remember { mutableStateListOf<TvItem>() }
@@ -163,6 +178,9 @@ private fun IPTVPlusApp() {
             .putBoolean("auto_play_next", autoPlayNext)
             .putBoolean("player_active", page == "Leitor")
             .putInt("accent_index", accentIndex)
+            .putString("opensubtitles_api_key", openSubtitleApiKey)
+            .putString("opensubtitles_user", openSubtitleUser)
+            .putString("opensubtitles_password", openSubtitlePassword)
             .apply()
     }
     LaunchedEffect(page, keepScreenOn) {
@@ -193,14 +211,49 @@ private fun IPTVPlusApp() {
     }
     fun loadM3u() = launchLoad {
         val parsed = withContext(Dispatchers.IO) { IptvData.loadM3u(playlistUrl) }
-        channels = parsed; status = "Lista carregada: ${parsed.size} canais."; page = "TV em direto"
+        withContext(Dispatchers.IO) { catalogDb.replaceKind("live", parsed) }
+        channels = parsed; status = "Lista carregada: ${parsed.size} canais (guardados no telefone)."; page = "TV em direto"
     }
     fun loadXtream() = launchLoad {
-        val found = withContext(Dispatchers.IO) { IptvData.loadXtreamLive(server, username, password, maxLiveChannels) }
+        val serverToSave = server.trim()
+        val usernameToSave = username.trim()
+        val passwordToSave = password
+        val found = withContext(Dispatchers.IO) { IptvData.loadXtreamLive(serverToSave, usernameToSave, passwordToSave, maxLiveChannels) }
+        // Save the account only after a successful connection; Android keeps these preferences
+        // in the app's private storage so they survive closing/restarting the app.
+        prefs.edit()
+            .putString("xtream_server", serverToSave)
+            .putString("xtream_username", usernameToSave)
+            .putString("xtream_password", passwordToSave)
+            .apply()
+        server = serverToSave
+        username = usernameToSave
+        withContext(Dispatchers.IO) { catalogDb.replaceKind("live", found) }
         channels = found
         movies.clear(); series.clear(); homeMovies.clear(); homeSeries.clear(); vodLoaded = false; seriesLoaded = false; homePreviewLoaded = false
-        status = "Xtream Codes: ${channels.size} canais carregados. Filmes e séries serão carregados apenas quando abrires essas secções."
+        status = "Xtream Codes: ${channels.size} canais carregados e guardados neste telefone. Conta guardada."
         page = "Início"
+    }
+
+    // Restore the last saved catalog from the phone first, then refresh Xtream in the background.
+    LaunchedEffect(Unit) {
+        try {
+            val cached = withContext(Dispatchers.IO) {
+                Triple(catalogDb.getItems("live"), catalogDb.getItems("movie"), catalogDb.getItems("series"))
+            }
+            if (channels.isEmpty() && cached.first.isNotEmpty()) channels = cached.first
+            if (movies.isEmpty() && cached.second.isNotEmpty()) { movies.addAll(cached.second); vodLoaded = true }
+            if (series.isEmpty() && cached.third.isNotEmpty()) { series.addAll(cached.third); seriesLoaded = true }
+            if (cached.first.isNotEmpty()) status = "Catálogo restaurado do telefone: ${cached.first.size} canais."
+        } catch (e: Exception) { status = "Não foi possível ler o catálogo local: ${e.message ?: "erro de base de dados"}" }
+    }
+
+    // Reconnect automatically on the next launch when a previously saved Xtream account exists.
+    LaunchedEffect(Unit) {
+        if (server.isNotBlank() && username.isNotBlank() && password.isNotBlank()) {
+            status = "A restaurar a lista Xtream Codes guardada…"
+            loadXtream()
+        }
     }
     LaunchedEffect(page, server, username, password, channels.size, loading) {
         if (page == "Início" && channels.isNotEmpty() && server.isNotBlank() && username.isNotBlank() && password.isNotBlank() && !homePreviewLoaded && !loading) launchLoad {
@@ -214,19 +267,58 @@ private fun IPTVPlusApp() {
         if (server.isNotBlank() && username.isNotBlank() && password.isNotBlank()) {
             if (page == "Filmes" && !vodLoaded && !loading) launchLoad {
                 val found = withContext(Dispatchers.IO) { IptvData.loadVodCatalog(server, username, password) }
+                withContext(Dispatchers.IO) { catalogDb.replaceKind("movie", found) }
                 movies.clear(); movies.addAll(found); vodLoaded = true
-                status = "Filmes carregados: ${movies.size}."
+                status = "Filmes carregados e guardados: ${movies.size}."
             }
             if (page == "Séries" && !seriesLoaded && !loading) launchLoad {
                 val found = withContext(Dispatchers.IO) { IptvData.loadSeriesCatalog(server, username, password) }
+                withContext(Dispatchers.IO) { catalogDb.replaceKind("series", found) }
                 series.clear(); series.addAll(found); seriesLoaded = true
-                status = "Séries carregadas: ${series.size}."
+                status = "Séries carregadas e guardadas: ${series.size}."
             }
         }
     }
     fun loadEpg() = launchLoad {
         val result = withContext(Dispatchers.IO) { IptvData.loadXmltv(epgUrl) }
         programmes.clear(); programmes.addAll(result); status = "EPG carregado: ${result.size} programas."; page = "EPG"
+    }
+
+    fun searchOnlineSubtitles() {
+        if (openSubtitleApiKey.isBlank()) { subtitleStatus = "Introduz a API key do OpenSubtitles em Definições."; return }
+        if (subtitleQuery.isBlank()) { subtitleStatus = "Indica o título do filme ou episódio."; return }
+        subtitleLoading = true; subtitleStatus = "A pesquisar legendas…"; subtitleResults = emptyList()
+        (context as? ComponentActivity)?.lifecycleScope?.launch {
+            try {
+                val result = withContext(Dispatchers.IO) { SubtitleService.search(openSubtitleApiKey.trim(), subtitleQuery.trim(), subtitleLanguage) }
+                subtitleResults = result
+                subtitleStatus = if (result.isEmpty()) "Não foram encontradas legendas. Experimenta outro título ou idioma." else "${result.size} resultados encontrados."
+            } catch (e: Exception) { subtitleStatus = "Falha na pesquisa: ${e.message ?: "verifica a API key e a ligação"}" }
+            finally { subtitleLoading = false }
+        }
+    }
+    fun downloadOnlineSubtitle(subtitle: OnlineSubtitle) {
+        if (openSubtitleApiKey.isBlank() || openSubtitleUser.isBlank() || openSubtitlePassword.isBlank()) {
+            subtitleStatus = "Para descarregar, configura API key, utilizador e palavra-passe do OpenSubtitles em Definições."; return
+        }
+        subtitleLoading = true; subtitleStatus = "A descarregar legenda…"
+        (context as? ComponentActivity)?.lifecycleScope?.launch {
+            try {
+                val file = withContext(Dispatchers.IO) { SubtitleService.download(context.cacheDir, openSubtitleApiKey.trim(), openSubtitleUser.trim(), openSubtitlePassword, subtitle.fileId) }
+                val item = selected
+                if (item == null) error("Não há vídeo selecionado")
+                val subtitleConfig = MediaItem.SubtitleConfiguration.Builder(Uri.fromFile(file))
+                    .setMimeType(MimeTypes.APPLICATION_SUBRIP)
+                    .setLanguage(subtitle.language)
+                    .setLabel("OpenSubtitles · ${subtitle.language}")
+                    .setSelectionFlags(androidx.media3.common.C.SELECTION_FLAG_DEFAULT)
+                    .build()
+                exoPlayer.setMediaItem(MediaItem.Builder().setUri(item.url).setSubtitleConfigurations(listOf(subtitleConfig)).build())
+                exoPlayer.prepare(); exoPlayer.playWhenReady = true
+                subtitleStatus = "Legenda aplicada. Se não aparecer, abre o seletor de faixas do player."
+            } catch (e: Exception) { subtitleStatus = "Não foi possível descarregar/aplicar: ${e.message ?: "erro desconhecido"}" }
+            finally { subtitleLoading = false }
+        }
     }
 
     MaterialTheme(colorScheme = darkColorScheme(primary = accent, background = bg, surface = panel, onSurface = Color.White, onBackground = Color.White)) {
@@ -331,7 +423,6 @@ private fun IPTVPlusApp() {
                                 else LazyColumn(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                                     items(visibleChannels, key = { it.url }) { item -> ChannelRow(item, accent, muted, panel, favorites) { play(item) } }
                                 }
-                                if (channels.size >= maxLiveChannels) Text("Por segurança, são apresentados no máximo $maxLiveChannels canais desta lista. Podes pesquisar e filtrar por categoria.", color = muted, fontSize = 12.sp, modifier = Modifier.padding(vertical = 6.dp))
                             }
                         }
                         "Mais" -> Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -357,7 +448,8 @@ private fun IPTVPlusApp() {
                             if (fullscreen) IconButton(onClick = { fullscreen = false }, modifier = Modifier.align(Alignment.TopEnd).padding(12.dp)) { Icon(Icons.Default.FullscreenExit, "Sair de ecrã inteiro", tint = Color.White) }
                             if (!fullscreen) Column(Modifier.align(Alignment.BottomCenter).fillMaxWidth().background(bg).padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                                 Text(selected?.name ?: "Leitor integrado", color = Color.White, fontWeight = FontWeight.SemiBold)
-                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) { Button(onClick = { exoPlayer.play() }) { Icon(Icons.Default.PlayArrow, null); Text("Reproduzir") }; OutlinedButton(onClick = { exoPlayer.pause() }) { Icon(Icons.Default.Pause, null); Text("Pausa") }; OutlinedButton(onClick = { fullscreen = true }) { Icon(Icons.Default.Fullscreen, null); Text("Ecrã inteiro") } }
+                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) { Button(onClick = { exoPlayer.play() }) { Icon(Icons.Default.PlayArrow, null); Text("Reproduzir") }; OutlinedButton(onClick = { exoPlayer.pause() }) { Icon(Icons.Default.Pause, null); Text("Pausa") }; OutlinedButton(onClick = { fullscreen = true }) { Icon(Icons.Default.Fullscreen, null); Text("Ecrã inteiro") } }
+                                OutlinedButton(onClick = { subtitleQuery = selected?.name ?: ""; subtitleResults = emptyList(); subtitleStatus = ""; openSubtitleSearch = true }, modifier = Modifier.fillMaxWidth()) { Icon(Icons.Default.Subtitles, null); Spacer(Modifier.width(8.dp)); Text("Procurar legendas online") }
                             }
                         }
                         "Definições" -> Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(14.dp)) {
@@ -396,14 +488,53 @@ private fun IPTVPlusApp() {
                                 }
                             }
                             HorizontalDivider(color = muted.copy(alpha=.2f))
+                            Text("Legendas online · OpenSubtitles", fontSize = 20.sp, fontWeight = FontWeight.Bold)
+                            Text("Cria uma API key no teu perfil OpenSubtitles. Para descarregar ficheiros, a API também exige autenticação da conta. As credenciais ficam guardadas localmente neste dispositivo.", color = muted, fontSize = 12.sp)
+                            OutlinedTextField(value = openSubtitleApiKey, onValueChange = { openSubtitleApiKey = it }, label = { Text("API key OpenSubtitles") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
+                            OutlinedTextField(value = openSubtitleUser, onValueChange = { openSubtitleUser = it }, label = { Text("Utilizador OpenSubtitles") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
+                            OutlinedTextField(value = openSubtitlePassword, onValueChange = { openSubtitlePassword = it }, label = { Text("Palavra-passe OpenSubtitles") }, visualTransformation = PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth(), singleLine = true)
+                            Text("Para uma futura publicação pública, é preferível transferir a autenticação para um serviço intermediário protegido em vez de guardar credenciais diretamente no dispositivo.", color = muted, fontSize = 12.sp)
+                            HorizontalDivider(color = muted.copy(alpha=.2f))
                             Text("Sobre o IPTV+", fontWeight = FontWeight.SemiBold)
-                            Text("Versão 0.3.7 · Buffer configurável, preferências do player, janela PiP e interface adaptativa.", color = muted)
+                            Text("Versão 0.3.8 · Pesquisa e transferência de legendas online, além das preferências do player.", color = muted)
                             Text("O funcionamento de PiP depende do Android e do dispositivo. A opção de descodificação por software é experimental.", color = muted, fontSize = 12.sp)
                         }
                     }
                 }
             }
         }
+    }
+    if (openSubtitleSearch) {
+        AlertDialog(
+            onDismissRequest = { if (!subtitleLoading) openSubtitleSearch = false },
+            title = { Text("Legendas online") },
+            text = {
+                Column(Modifier.fillMaxWidth().heightIn(max = 520.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    OutlinedTextField(value = subtitleQuery, onValueChange = { subtitleQuery = it }, label = { Text("Filme ou episódio") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
+                    Text("Idioma", fontWeight = FontWeight.SemiBold)
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        FilterChip(selected = subtitleLanguage == "pt", onClick = { subtitleLanguage = "pt" }, label = { Text("Português") })
+                        FilterChip(selected = subtitleLanguage == "en", onClick = { subtitleLanguage = "en" }, label = { Text("English") })
+                        FilterChip(selected = subtitleLanguage == "pt,en", onClick = { subtitleLanguage = "pt,en" }, label = { Text("Ambos") })
+                    }
+                    Button(onClick = { searchOnlineSubtitles() }, enabled = !subtitleLoading && subtitleQuery.isNotBlank(), modifier = Modifier.fillMaxWidth()) { Text(if (subtitleLoading) "A processar…" else "Pesquisar") }
+                    if (subtitleStatus.isNotBlank()) Text(subtitleStatus, color = muted, fontSize = 12.sp)
+                    subtitleResults.forEach { result ->
+                        Surface(color = panel, shape = RoundedCornerShape(10.dp), modifier = Modifier.fillMaxWidth()) {
+                            Row(Modifier.padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
+                                Column(Modifier.weight(1f)) {
+                                    Text("${result.language.uppercase()} · ${result.release.ifBlank { "Lançamento não indicado" }}", fontWeight = FontWeight.SemiBold)
+                                    Text("${result.downloads} downloads", color = muted, fontSize = 12.sp)
+                                }
+                                Button(onClick = { downloadOnlineSubtitle(result) }, enabled = !subtitleLoading) { Text("Usar") }
+                            }
+                        }
+                    }
+                    if (openSubtitleApiKey.isBlank()) Text("Configura primeiro a API key em Mais → Definições.", color = muted, fontSize = 12.sp)
+                }
+            },
+            confirmButton = { TextButton(onClick = { openSubtitleSearch = false }) { Text("Fechar") } }
+        )
     }
 }
 
@@ -474,18 +605,39 @@ private fun MoreMenuRow(title: String, subtitle: String, icon: androidx.compose.
 }
 
 @Composable private fun MediaLibraryPage(title:String, mediaItems:List<TvItem>, filter:String, onFilter:(String)->Unit, accent:Color, emptyHint:String, onSelect:(TvItem)->Unit) {
+    var selectedCategory by remember(title) { mutableStateOf("Todas") }
+    val categoryCounts = remember(mediaItems) {
+        mediaItems.groupingBy { it.group.ifBlank { "Geral" } }.eachCount().toSortedMap()
+    }
+    val visibleItems = remember(mediaItems, filter, selectedCategory) {
+        mediaItems.filter { item ->
+            (selectedCategory == "Todas" || item.group.ifBlank { "Geral" } == selectedCategory) &&
+                (item.name.contains(filter, ignoreCase=true) || item.group.contains(filter, ignoreCase=true))
+        }
+    }
     Column(Modifier.fillMaxSize()) {
         OutlinedTextField(value=filter, onValueChange=onFilter, label={ Text("Pesquisar $title") }, leadingIcon={ Icon(Icons.Default.Search, null) }, singleLine=true, modifier=Modifier.fillMaxWidth())
-        Spacer(Modifier.height(10.dp))
+        if (mediaItems.isNotEmpty()) {
+            Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(vertical=10.dp), horizontalArrangement=Arrangement.spacedBy(8.dp)) {
+                FilterChip(selected=selectedCategory=="Todas", onClick={ selectedCategory="Todas" }, label={ Text("Todas (${mediaItems.size})") })
+                categoryCounts.forEach { (groupName, count) ->
+                    FilterChip(selected=selectedCategory==groupName, onClick={ selectedCategory=groupName }, label={ Text("$groupName ($count)", maxLines=1) })
+                }
+            }
+        }
         if (mediaItems.isEmpty()) EmptyPanel("$title ainda não carregados", emptyHint, accent)
+        else if (visibleItems.isEmpty()) EmptyPanel("Sem resultados", "Altera a pesquisa ou a categoria.", accent)
         else LazyColumn(verticalArrangement=Arrangement.spacedBy(8.dp)) {
-            items(mediaItems, key = { "${it.kind}_${it.id}" }) { item ->
-                if (item.name.contains(filter, ignoreCase=true) || item.group.contains(filter, ignoreCase=true)) {
-                    Row(Modifier.fillMaxWidth().background(panel, RoundedCornerShape(12.dp)).clickable { onSelect(item) }.padding(14.dp), verticalAlignment=Alignment.CenterVertically) {
-                        Icon(if (item.kind == "series") Icons.Default.Tv else Icons.Default.Movie, null, tint=accent)
-                        Spacer(Modifier.width(12.dp)); Column(Modifier.weight(1f)) { Text(item.name, fontWeight=FontWeight.SemiBold); Text(item.group, color=muted, fontSize=12.sp) }
-                        Icon(Icons.Default.PlayArrow, null, tint=accent)
+            items(visibleItems, key = { "${it.kind}_${it.id}" }) { item ->
+                Row(Modifier.fillMaxWidth().background(panel, RoundedCornerShape(14.dp)).clickable { onSelect(item) }.padding(10.dp), verticalAlignment=Alignment.CenterVertically) {
+                    Surface(shape = RoundedCornerShape(8.dp), color = bg, modifier = Modifier.width(88.dp).height(124.dp)) {
+                        Box {
+                            if (item.logo.isNotBlank()) AsyncImage(model = item.logo, contentDescription = item.name, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
+                            else Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Icon(if (item.kind == "series") Icons.Default.Tv else Icons.Default.Movie, null, tint = accent, modifier = Modifier.size(30.dp)) }
+                        }
                     }
+                    Spacer(Modifier.width(12.dp)); Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(5.dp)) { Text(item.name, fontWeight=FontWeight.SemiBold, maxLines=2); Text(item.group, color=muted, fontSize=12.sp, maxLines=1) }
+                    Icon(Icons.Default.PlayArrow, null, tint=accent)
                 }
             }
         }
@@ -494,6 +646,60 @@ private fun MoreMenuRow(title: String, subtitle: String, icon: androidx.compose.
 
 @Composable private fun StatCard(label:String, value:String, modifier:Modifier, accent:Color) { Surface(modifier, color=panel, shape=RoundedCornerShape(16.dp)) { Column(Modifier.padding(16.dp)) { Text(value, color=accent, fontSize=26.sp, fontWeight=FontWeight.Bold); Text(label, color=muted) } } }
 @Composable private fun EmptyPanel(title:String, detail:String, accent:Color) { Column(Modifier.fillMaxSize().padding(24.dp), verticalArrangement=Arrangement.Center, horizontalAlignment=Alignment.CenterHorizontally) { Icon(Icons.Default.LiveTv, null, tint=accent, modifier=Modifier.size(48.dp)); Spacer(Modifier.height(12.dp)); Text(title, fontSize=19.sp, fontWeight=FontWeight.Bold); Spacer(Modifier.height(6.dp)); Text(detail, color=muted) } }
+
+
+private object SubtitleService {
+    private const val BASE = "https://api.opensubtitles.com/api/v1"
+    private const val USER_AGENT = "IPTVPlus v0.3.8"
+    private fun request(url: String, method: String, apiKey: String, token: String? = null, body: String? = null): String {
+        val conn = URL(url).openConnection() as HttpURLConnection
+        conn.requestMethod = method; conn.connectTimeout = 15000; conn.readTimeout = 30000
+        conn.setRequestProperty("Api-Key", apiKey); conn.setRequestProperty("User-Agent", USER_AGENT); conn.setRequestProperty("Accept", "application/json")
+        if (token != null) conn.setRequestProperty("Authorization", "Bearer $token")
+        if (body != null) { conn.doOutput = true; conn.setRequestProperty("Content-Type", "application/json"); conn.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) } }
+        return try {
+            val code = conn.responseCode
+            val stream = if (code in 200..299) conn.inputStream else conn.errorStream
+            val text = stream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() } ?: ""
+            if (code !in 200..299) error("OpenSubtitles HTTP $code: ${runCatching { JSONObject(text).optString("message") }.getOrDefault(text.take(180))}")
+            text
+        } finally { conn.disconnect() }
+    }
+    fun search(apiKey: String, query: String, languages: String): List<OnlineSubtitle> {
+        val url = "$BASE/subtitles?query=${URLEncoder.encode(query, "UTF-8")}&languages=${URLEncoder.encode(languages, "UTF-8")}&order_by=download_count&order_direction=desc"
+        val json = JSONObject(request(url, "GET", apiKey))
+        val data = json.optJSONArray("data") ?: JSONArray()
+        val out = mutableListOf<OnlineSubtitle>()
+        for (i in 0 until minOf(data.length(), 20)) {
+            val attrs = data.optJSONObject(i)?.optJSONObject("attributes") ?: continue
+            val files = attrs.optJSONArray("files") ?: JSONArray()
+            if (files.length() == 0) continue
+            val fileId = files.optJSONObject(0)?.optLong("file_id", -1L) ?: -1L
+            if (fileId <= 0L) continue
+            out.add(OnlineSubtitle(fileId, attrs.optString("language", "und"), attrs.optString("release", ""), attrs.optInt("download_count", 0)))
+        }
+        return out
+    }
+    fun download(cacheDir: File, apiKey: String, username: String, password: String, fileId: Long): File {
+        val loginBody = JSONObject().put("username", username).put("password", password).toString()
+        val login = JSONObject(request("$BASE/login", "POST", apiKey, body = loginBody))
+        val token = login.optString("token")
+        if (token.isBlank()) error("Autenticação OpenSubtitles não devolveu token")
+        val body = JSONObject().put("file_id", fileId).put("sub_format", "srt").toString()
+        val response = JSONObject(request("$BASE/download", "POST", apiKey, token, body))
+        val link = response.optString("link")
+        if (!link.startsWith("https://")) error("OpenSubtitles não devolveu uma ligação segura para a legenda")
+        val conn = URL(link).openConnection() as HttpURLConnection
+        conn.connectTimeout = 15000; conn.readTimeout = 30000
+        return try {
+            if (conn.responseCode !in 200..299) error("Falha ao descarregar a legenda (HTTP ${conn.responseCode})")
+            val file = File(cacheDir, "online_subtitle_${System.currentTimeMillis()}.srt")
+            conn.inputStream.use { input -> file.outputStream().use { output -> input.copyTo(output) } }
+            if (file.length() == 0L) { file.delete(); error("O ficheiro de legenda está vazio") }
+            file
+        } finally { conn.disconnect() }
+    }
+}
 
 private object IptvData {
     private fun fetch(url: String): String {
@@ -571,7 +777,10 @@ private object IptvData {
                         "name" -> name = reader.readJsonScalar()
                         "category_id" -> categoryId = reader.readJsonScalar()
                         "category_name" -> categoryName = reader.readJsonScalar()
-                        "stream_icon", "cover" -> icon = reader.readJsonScalar()
+                        "stream_icon", "cover", "cover_big", "movie_image", "movie_cover" -> {
+                            val candidate = reader.readJsonScalar()
+                            if (candidate.isNotBlank() && (icon.isBlank() || candidate.contains("http", true))) icon = candidate
+                        }
                         "container_extension" -> extension = reader.readJsonScalar().ifBlank { "mp4" }
                         else -> reader.skipValue()
                     }
