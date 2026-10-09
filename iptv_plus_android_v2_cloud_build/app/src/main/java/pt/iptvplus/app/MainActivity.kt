@@ -125,6 +125,8 @@ private fun IPTVPlusApp() {
     var selected by remember { mutableStateOf<TvItem?>(null) }
     var filter by remember { mutableStateOf("") }
     var category by remember { mutableStateOf("Todos") }
+    var selectedTvGroup by remember { mutableStateOf<String?>(null) }
+    var aspectMode by remember { mutableStateOf(prefs.getString("aspect_mode", "fit") ?: "fit") }
     var favoritesOnly by remember { mutableStateOf(false) }
     var fullscreen by remember { mutableStateOf(false) }
     var bufferSetting by remember { mutableStateOf(prefs.getString("buffer_setting", "10") ?: "10") }
@@ -178,10 +180,11 @@ private fun IPTVPlusApp() {
     }
     DisposableEffect(exoPlayer) { onDispose { exoPlayer.release() } }
     val accent = accents[accentIndex]
-    LaunchedEffect(bufferSetting, decoderMode, pipEnabled, keepScreenOn, startPage, autoFullscreen, autoPlayNext, accentIndex, openSubtitleApiKey, openSubtitleUser, openSubtitlePassword, subtitleLanguage, page, favorites.toList(), recentChannels.toList()) {
+    LaunchedEffect(bufferSetting, decoderMode, pipEnabled, keepScreenOn, startPage, autoFullscreen, autoPlayNext, accentIndex, aspectMode, openSubtitleApiKey, openSubtitleUser, openSubtitlePassword, subtitleLanguage, page, favorites.toList(), recentChannels.toList()) {
         prefs.edit()
             .putString("buffer_setting", bufferSetting)
             .putString("decoder_mode", decoderMode)
+            .putString("aspect_mode", aspectMode)
             .putBoolean("pip_enabled", pipEnabled)
             .putBoolean("keep_screen_on", keepScreenOn)
             .putString("start_page", startPage)
@@ -363,7 +366,7 @@ private fun IPTVPlusApp() {
             Row(Modifier.fillMaxSize().padding(if (fullscreen) PaddingValues(0.dp) else pad).background(bg)) {
                 if (isTv && !fullscreen) NavigationRail(containerColor = panel, header = { Text("IPTV+", color = accent, fontWeight = FontWeight.Black, modifier = Modifier.padding(14.dp)) }) {
                     listOf("Início" to Icons.Default.Home, "TV em direto" to Icons.Default.LiveTv, "Filmes" to Icons.Default.Movie, "Séries" to Icons.Default.Tv, "Mais" to Icons.Default.MoreHoriz).forEach { (label, icon) ->
-                        NavigationRailItem(selected = page == label || (label == "Mais" && page in listOf("Mais", "EPG", "Listas", "Definições")), onClick = { page = label }, icon = { Icon(icon, null) }, label = { Text(label, fontSize = 10.sp) }, alwaysShowLabel = true)
+                        NavigationRailItem(selected = page == label || (label == "Mais" && page in listOf("Mais", "EPG", "Listas", "Definições")), onClick = { page = label }, icon = { Icon(icon, null) }, label = { Text(label, fontSize = if (cfg.screenHeightDp < 500) 9.sp else 10.sp, maxLines = 1) }, alwaysShowLabel = cfg.screenHeightDp >= 500)
                     }
                 }
                 Column(Modifier.weight(1f).fillMaxHeight().padding(if (fullscreen) PaddingValues(0.dp) else PaddingValues(horizontal = if (isTv) 24.dp else 16.dp, vertical = 12.dp))) {
@@ -432,24 +435,49 @@ private fun IPTVPlusApp() {
                         }
                         "TV em direto" -> Column(Modifier.fillMaxSize()) {
                             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                OutlinedTextField(filter, { filter = it }, label = { Text("Pesquisar canais") }, modifier = Modifier.weight(1f), singleLine = true, leadingIcon = { Icon(Icons.Default.Search, null) })
+                                if (selectedTvGroup != null) {
+                                    IconButton(onClick = { selectedTvGroup = null; filter = "" }) { Icon(Icons.Default.ArrowBack, "Voltar aos grupos") }
+                                }
+                                OutlinedTextField(
+                                    value = filter, onValueChange = { filter = it },
+                                    label = { Text(if (selectedTvGroup == null) "Pesquisar grupos" else "Pesquisar canais") },
+                                    modifier = Modifier.weight(1f).heightIn(max = 54.dp), singleLine = true,
+                                    shape = RoundedCornerShape(24.dp), leadingIcon = { Icon(Icons.Default.Search, null) }
+                                )
                                 FilterChip(selected = favoritesOnly, onClick = { favoritesOnly = !favoritesOnly }, label = { Icon(Icons.Default.Favorite, null) })
                             }
                             if (channels.isEmpty()) EmptyPanel("Ainda não há canais", "Vai a Mais → Listas para importar uma lista M3U ou ligar Xtream Codes.", accent)
                             else {
-                                val groupCounts = remember(channels.size) { channels.groupingBy { it.group.ifBlank { "Geral" } }.eachCount().toSortedMap() }
-                                Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(vertical = 10.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                    FilterChip(selected = category == "Todos", onClick = { category = "Todos" }, label = { Text("Todos (${channels.size})") })
-                                    groupCounts.forEach { (groupName, count) ->
-                                        FilterChip(selected = category == groupName, onClick = { category = groupName }, label = { Text("$groupName ($count)", maxLines = 1) })
+                                val groupCounts = remember(channels) { channels.groupingBy { it.group.ifBlank { "Geral" } }.eachCount().toSortedMap() }
+                                if (selectedTvGroup == null) {
+                                    LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp), contentPadding = PaddingValues(vertical = 10.dp)) {
+                                        item {
+                                            Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(panel).clickable { selectedTvGroup = "Todos"; filter = "" }.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
+                                                Icon(Icons.Default.LiveTv, null, tint = accent, modifier = Modifier.size(28.dp)); Spacer(Modifier.width(12.dp))
+                                                Column(Modifier.weight(1f)) { Text("Todos os canais", fontWeight = FontWeight.SemiBold); Text("${channels.size} canais", color = muted, fontSize = 12.sp) }
+                                                Icon(Icons.Default.ChevronRight, null, tint = muted)
+                                            }
+                                        }
+                                        items(groupCounts.entries.filter { it.key.contains(filter, ignoreCase = true) }.toList(), key = { it.key }) { entry ->
+                                            Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(panel).clickable { selectedTvGroup = entry.key; filter = "" }.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
+                                                Icon(Icons.Default.Folder, null, tint = accent, modifier = Modifier.size(28.dp)); Spacer(Modifier.width(12.dp))
+                                                Column(Modifier.weight(1f)) { Text(entry.key, fontWeight = FontWeight.SemiBold, maxLines = 1); Text("${entry.value} canais", color = muted, fontSize = 12.sp) }
+                                                Icon(Icons.Default.ChevronRight, null, tint = muted)
+                                            }
+                                        }
                                     }
-                                }
-                                val visibleChannels = remember(channels, filter, favoritesOnly, category, favorites.toList()) {
-                                    channels.filter { it.name.contains(filter, true) && (!favoritesOnly || it.url in favorites) && (category == "Todos" || it.group.ifBlank { "Geral" } == category) }
-                                }
-                                if (visibleChannels.isEmpty()) EmptyPanel("Sem resultados", "Altera a categoria ou a pesquisa.", accent)
-                                else LazyColumn(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                                    items(visibleChannels, key = { it.url }) { item -> ChannelRow(item, accent, muted, panel, favorites) { play(item) } }
+                                } else {
+                                    Row(Modifier.fillMaxWidth().padding(vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                                        Text(if (selectedTvGroup == "Todos") "Todos os canais" else selectedTvGroup!!, modifier = Modifier.weight(1f), fontWeight = FontWeight.Bold)
+                                        TextButton(onClick = { selectedTvGroup = null; filter = "" }) { Text("Grupos") }
+                                    }
+                                    val visibleChannels = remember(channels, filter, favoritesOnly, selectedTvGroup, favorites.toList()) {
+                                        channels.filter { (selectedTvGroup == "Todos" || it.group.ifBlank { "Geral" } == selectedTvGroup) && it.name.contains(filter, true) && (!favoritesOnly || it.url in favorites) }
+                                    }
+                                    if (visibleChannels.isEmpty()) EmptyPanel("Sem resultados", "Altera a pesquisa ou a categoria.", accent)
+                                    else LazyColumn(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                        items(visibleChannels, key = { it.url }) { item -> ChannelRow(item, accent, muted, panel, favorites) { play(item) } }
+                                    }
                                 }
                             }
                         }
@@ -478,14 +506,22 @@ private fun IPTVPlusApp() {
                                     useController = true
                                     controllerAutoShow = true
                                     controllerShowTimeoutMs = 3500
-                                    resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
+                                    resizeMode = when (aspectMode) { "16:9" -> AspectRatioFrameLayout.RESIZE_MODE_FIT; "4:3" -> AspectRatioFrameLayout.RESIZE_MODE_ZOOM; "fill" -> AspectRatioFrameLayout.RESIZE_MODE_FILL; "zoom" -> AspectRatioFrameLayout.RESIZE_MODE_ZOOM; else -> AspectRatioFrameLayout.RESIZE_MODE_FIT }
                                     setShowSubtitleButton(true)
                                     setShowBuffering(PlayerView.SHOW_BUFFERING_WHEN_PLAYING)
-                                } }, modifier = Modifier.fillMaxSize())
+                                } }, update = { view ->
+                                    view.resizeMode = when (aspectMode) { "16:9" -> AspectRatioFrameLayout.RESIZE_MODE_FIT; "4:3" -> AspectRatioFrameLayout.RESIZE_MODE_ZOOM; "fill" -> AspectRatioFrameLayout.RESIZE_MODE_FILL; "zoom" -> AspectRatioFrameLayout.RESIZE_MODE_ZOOM; else -> AspectRatioFrameLayout.RESIZE_MODE_FIT }
+                                }, modifier = Modifier.fillMaxSize())
                                 if (fullscreen) IconButton(onClick = { fullscreen = false }, modifier = Modifier.align(Alignment.TopEnd).padding(8.dp)) { Icon(Icons.Default.FullscreenExit, "Sair de ecrã inteiro", tint = Color.White) }
                             }
                             if (!fullscreen) Column(Modifier.fillMaxWidth().background(bg).padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                                 Text(selected?.name ?: "Leitor integrado", color = Color.White, fontWeight = FontWeight.SemiBold)
+                                Text("Formato de imagem", color = muted, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                                Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                    listOf("fit" to "Ajustar", "16:9" to "16:9", "4:3" to "4:3", "fill" to "Preencher", "zoom" to "Zoom").forEach { (value, label) ->
+                                        FilterChip(selected = aspectMode == value, onClick = { aspectMode = value }, label = { Text(label) })
+                                    }
+                                }
                                 OutlinedButton(onClick = { fullscreen = true }, modifier = Modifier.fillMaxWidth()) { Icon(Icons.Default.Fullscreen, null); Spacer(Modifier.width(8.dp)); Text("Ecrã inteiro") }
                                 OutlinedButton(onClick = { subtitleQuery = selected?.name ?: ""; subtitleResults = emptyList(); subtitleStatus = ""; openSubtitleSearch = true }, modifier = Modifier.fillMaxWidth()) { Icon(Icons.Default.Subtitles, null); Spacer(Modifier.width(8.dp)); Text("Procurar legendas online") }
                             }
@@ -534,7 +570,7 @@ private fun IPTVPlusApp() {
                             Text("Para uma futura publicação pública, é preferível transferir a autenticação para um serviço intermediário protegido em vez de guardar credenciais diretamente no dispositivo.", color = muted, fontSize = 12.sp)
                             HorizontalDivider(color = muted.copy(alpha=.2f))
                             Text("Sobre o IPTV+", fontWeight = FontWeight.SemiBold)
-                            Text("Versão 0.4.2 · Histórico de canais e preferências persistentes.", color = muted)
+                            Text("Versão 0.5.0 · Melhorias de navegação e reprodução.", color = muted)
                             Text("O funcionamento de PiP depende do Android e do dispositivo. A opção de descodificação por software é experimental.", color = muted, fontSize = 12.sp)
                         }
                     }
@@ -550,7 +586,7 @@ private fun IPTVPlusApp() {
                 Column(Modifier.fillMaxWidth().heightIn(max = 520.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     OutlinedTextField(value = subtitleQuery, onValueChange = { subtitleQuery = it }, label = { Text("Filme ou episódio") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
                     Text("Idioma", fontWeight = FontWeight.SemiBold)
-                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                         FilterChip(selected = subtitleLanguage == "pt", onClick = { subtitleLanguage = "pt" }, label = { Text("Português") })
                         FilterChip(selected = subtitleLanguage == "en", onClick = { subtitleLanguage = "en" }, label = { Text("English") })
                         FilterChip(selected = subtitleLanguage == "pt,en", onClick = { subtitleLanguage = "pt,en" }, label = { Text("Ambos") })
@@ -654,7 +690,7 @@ private fun MoreMenuRow(title: String, subtitle: String, icon: androidx.compose.
         }
     }
     Column(Modifier.fillMaxSize()) {
-        OutlinedTextField(value=filter, onValueChange=onFilter, label={ Text("Pesquisar $title") }, leadingIcon={ Icon(Icons.Default.Search, null) }, singleLine=true, modifier=Modifier.fillMaxWidth().heightIn(max = 56.dp))
+        OutlinedTextField(value=filter, onValueChange=onFilter, label={ Text("Pesquisar $title") }, leadingIcon={ Icon(Icons.Default.Search, null) }, singleLine=true, modifier=Modifier.fillMaxWidth().heightIn(max = 52.dp), shape=RoundedCornerShape(24.dp))
         if (mediaItems.isNotEmpty()) {
             Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(vertical=12.dp), horizontalArrangement=Arrangement.spacedBy(8.dp)) {
                 FilterChip(selected=selectedCategory=="Todas", onClick={ selectedCategory="Todas" }, modifier=Modifier.heightIn(min=48.dp), label={ Text("Todas (${mediaItems.size})", fontSize=14.sp) })
