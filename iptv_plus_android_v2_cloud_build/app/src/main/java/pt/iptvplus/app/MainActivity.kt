@@ -12,6 +12,8 @@ import android.view.View
 import android.app.Activity
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.compose.animation.core.*
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
@@ -30,9 +32,11 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.KeyboardType
@@ -55,6 +59,7 @@ import androidx.media3.common.util.UnstableApi
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.xmlpull.v1.XmlPullParser
@@ -100,6 +105,13 @@ class MainActivity : ComponentActivity() {
 @Composable
 private fun IPTVPlusApp() {
     val context = LocalContext.current
+    var showSplash by remember { mutableStateOf(true) }
+    LaunchedEffect(Unit) {
+        // Shared preferences and local database are initialized before this screen.
+        // Do not wait for the full IPTV catalogue; it can contain tens of thousands of entries.
+        delay(1500)
+        showSplash = false
+    }
     val cfg = LocalConfiguration.current
     val isTv = cfg.uiMode and Configuration.UI_MODE_TYPE_MASK == Configuration.UI_MODE_TYPE_TELEVISION || cfg.screenWidthDp >= 800
     val prefs = remember { context.getSharedPreferences("iptv_plus_settings", android.content.Context.MODE_PRIVATE) }
@@ -349,6 +361,7 @@ private fun IPTVPlusApp() {
     }
 
     MaterialTheme(colorScheme = darkColorScheme(primary = accent, background = bg, surface = panel, onSurface = Color.White, onBackground = Color.White)) {
+        Box(Modifier.fillMaxSize().background(bg)) {
         Scaffold(containerColor = bg, bottomBar = { if (!isTv && !fullscreen) {
             Surface(color = bg, tonalElevation = 0.dp, shadowElevation = 10.dp) {
                 Row(Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 8.dp).background(panel, RoundedCornerShape(28.dp)).padding(5.dp), horizontalArrangement = Arrangement.spacedBy(3.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -364,14 +377,25 @@ private fun IPTVPlusApp() {
             }
         } }) { pad ->
             Row(Modifier.fillMaxSize().padding(if (fullscreen) PaddingValues(0.dp) else pad).background(bg)) {
-                if (isTv && !fullscreen) NavigationRail(containerColor = panel, header = { Text("IPTV+", color = accent, fontWeight = FontWeight.Black, modifier = Modifier.padding(14.dp)) }) {
+                if (isTv && !fullscreen) NavigationRail(containerColor = panel, header = { Row(Modifier.padding(10.dp), verticalAlignment = Alignment.CenterVertically) { Image(painterResource(R.drawable.lumio_logo), contentDescription = "Lumio IPTV", modifier = Modifier.size(34.dp)); Spacer(Modifier.width(6.dp)); Text("Lumio", color = accent, fontWeight = FontWeight.Black) } }) {
                     listOf("Início" to Icons.Default.Home, "TV em direto" to Icons.Default.LiveTv, "Filmes" to Icons.Default.Movie, "Séries" to Icons.Default.Tv, "Mais" to Icons.Default.MoreHoriz).forEach { (label, icon) ->
                         NavigationRailItem(selected = page == label || (label == "Mais" && page in listOf("Mais", "EPG", "Listas", "Definições")), onClick = { page = label }, icon = { Icon(icon, null) }, label = { Text(label, fontSize = if (cfg.screenHeightDp < 500) 9.sp else 10.sp, maxLines = 1) }, alwaysShowLabel = cfg.screenHeightDp >= 500)
                     }
                 }
                 Column(Modifier.weight(1f).fillMaxHeight().padding(if (fullscreen) PaddingValues(0.dp) else PaddingValues(horizontal = if (isTv) 24.dp else 16.dp, vertical = 12.dp))) {
                     if (!fullscreen) Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
-                        Column(Modifier.weight(1f)) { Text("IPTV+", color = accent, fontSize = 12.sp, fontWeight = FontWeight.Bold); Text(page, fontSize = if (isTv) 28.sp else 24.sp, fontWeight = FontWeight.Bold) }
+                        Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
+                            Image(painter = painterResource(id = R.drawable.lumio_logo), contentDescription = "Lumio IPTV", modifier = Modifier.size(if (isTv) 42.dp else 34.dp), contentScale = ContentScale.Fit)
+                            Spacer(Modifier.width(9.dp))
+                            Column { Text("Lumio IPTV", color = accent, fontSize = 12.sp, fontWeight = FontWeight.Bold); Text(page, fontSize = if (isTv) 28.sp else 24.sp, fontWeight = FontWeight.Bold) }
+                        }
+                        if (selected != null && page != "Leitor") {
+                            TextButton(onClick = { page = "Leitor" }, contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)) {
+                                Icon(Icons.Default.PlayCircle, null, tint = accent, modifier = Modifier.size(18.dp))
+                                Spacer(Modifier.width(4.dp))
+                                Text("A reproduzir", fontSize = 11.sp, maxLines = 1)
+                            }
+                        }
                         if (loading) CircularProgressIndicator(modifier = Modifier.size(24.dp), strokeWidth = 2.dp, color = accent)
                     }
                     if (!fullscreen) Spacer(Modifier.height(12.dp))
@@ -569,13 +593,43 @@ private fun IPTVPlusApp() {
                             OutlinedTextField(value = openSubtitlePassword, onValueChange = { openSubtitlePassword = it }, label = { Text("Palavra-passe OpenSubtitles") }, visualTransformation = PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth(), singleLine = true)
                             Text("Para uma futura publicação pública, é preferível transferir a autenticação para um serviço intermediário protegido em vez de guardar credenciais diretamente no dispositivo.", color = muted, fontSize = 12.sp)
                             HorizontalDivider(color = muted.copy(alpha=.2f))
-                            Text("Sobre o IPTV+", fontWeight = FontWeight.SemiBold)
-                            Text("Versão 0.5.0 · Melhorias de navegação e reprodução.", color = muted)
+                            Text("Sobre o Lumio IPTV", fontWeight = FontWeight.SemiBold)
+                            Text("Versão 0.6.0 · Identidade Lumio e melhorias de navegação e reprodução.", color = muted)
                             Text("O funcionamento de PiP depende do Android e do dispositivo. A opção de descodificação por software é experimental.", color = muted, fontSize = 12.sp)
                         }
                     }
                 }
             }
+        }
+        if (showSplash) {
+            val transition = rememberInfiniteTransition(label = "lumio-splash")
+            val pulse by transition.animateFloat(
+                initialValue = 0.88f, targetValue = 1f,
+                animationSpec = infiniteRepeatable(animation = tween(850), repeatMode = RepeatMode.Reverse),
+                label = "logo-pulse"
+            )
+            val glow by transition.animateFloat(
+                initialValue = 0.45f, targetValue = 1f,
+                animationSpec = infiniteRepeatable(animation = tween(1100), repeatMode = RepeatMode.Reverse),
+                label = "logo-glow"
+            )
+            Box(Modifier.fillMaxSize().background(Color(0xFF080D25)), contentAlignment = Alignment.Center) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(18.dp), modifier = Modifier.padding(28.dp)) {
+                    Image(
+                        painter = painterResource(R.drawable.lumio_logo),
+                        contentDescription = "Lumio IPTV",
+                        contentScale = ContentScale.Fit,
+                        modifier = Modifier.size(116.dp).graphicsLayer { scaleX = pulse; scaleY = pulse; alpha = 0.82f + glow * 0.18f }
+                    )
+                    Text("Lumio IPTV", color = Color.White, fontSize = 25.sp, fontWeight = FontWeight.Bold)
+                    Text("A preparar a tua experiência…", color = Color(0xFF9BAAC2), fontSize = 13.sp)
+                    LinearProgressIndicator(
+                        modifier = Modifier.width(156.dp).height(3.dp).clip(RoundedCornerShape(10.dp)),
+                        color = Color(0xFF527BFF), trackColor = Color(0xFF202B50)
+                    )
+                }
+            }
+        }
         }
     }
     if (openSubtitleSearch) {
