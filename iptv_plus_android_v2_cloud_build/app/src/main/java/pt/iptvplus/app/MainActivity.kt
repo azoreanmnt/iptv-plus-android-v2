@@ -115,8 +115,7 @@ private fun IPTVPlusApp() {
             .build()
         val renderersFactory = DefaultRenderersFactory(context)
             .setEnableDecoderFallback(true)
-            .setMediaCodecSelector(
-        MediaCodecSelector.DEFAULT)
+            .setMediaCodecSelector(MediaCodecSelector.DEFAULT)
         ExoPlayer.Builder(context, renderersFactory)
             .setLoadControl(loadControl)
             .build()
@@ -504,7 +503,13 @@ private object IptvData {
                     }
                     out.add(TvItem(name.ifBlank { if (kind == "live") "Canal $id" else if (kind == "movie") "Filme $id" else "Série $id" }, urlItem, group, icon, kind, id, extension))
                 }
-                if (out.size >= limit) break
+                // Drain the rest of the JSON array after reaching the result limit.
+                // Breaking without consuming it makes reader.endArray() throw and
+                // the Xtream loading appears to stop early.
+                if (out.size >= limit) {
+                    while (reader.hasNext()) reader.skipValue()
+                    break
+                }
             }
             reader.endArray()
         } finally { reader.close(); conn.disconnect() }
