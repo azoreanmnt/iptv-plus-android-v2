@@ -5,6 +5,9 @@ import android.util.JsonReader
 import android.util.JsonToken
 import android.net.Uri
 import android.os.Bundle
+import android.app.PictureInPictureParams
+import android.os.Build
+import android.util.Rational
 import android.view.View
 import android.app.Activity
 import androidx.activity.ComponentActivity
@@ -64,7 +67,28 @@ private data class TvItem(val name:String, val url:String, val group:String="Ger
 private data class Programme(val channel:String, val title:String, val start:String, val stop:String)
 
 class MainActivity : ComponentActivity() {
-    override fun onCreate(savedInstanceState: Bundle?) { super.onCreate(savedInstanceState); setContent { IPTVPlusApp() } }
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        setContent { IPTVPlusApp() }
+    }
+
+    override fun onUserLeaveHint() {
+        super.onUserLeaveHint()
+        val prefs = getSharedPreferences("iptv_plus_settings", MODE_PRIVATE)
+        val pipEnabled = prefs.getBoolean("pip_enabled", true)
+        val playerActive = prefs.getBoolean("player_active", false)
+        if (pipEnabled && playerActive && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !isInPictureInPictureMode) {
+            try {
+                enterPictureInPictureMode(
+                    PictureInPictureParams.Builder()
+                        .setAspectRatio(Rational(16, 9))
+                        .build()
+                )
+            } catch (_: IllegalArgumentException) {
+                // The system may reject PiP if the current window cannot enter it.
+            }
+        }
+    }
 }
 
 @OptIn(UnstableApi::class)
@@ -73,8 +97,9 @@ private fun IPTVPlusApp() {
     val context = LocalContext.current
     val cfg = LocalConfiguration.current
     val isTv = cfg.uiMode and Configuration.UI_MODE_TYPE_MASK == Configuration.UI_MODE_TYPE_TELEVISION || cfg.screenWidthDp >= 800
-    var page by remember { mutableStateOf("Início") }
-    var accentIndex by remember { mutableIntStateOf(0) }
+    val prefs = remember { context.getSharedPreferences("iptv_plus_settings", android.content.Context.MODE_PRIVATE) }
+    var page by remember { mutableStateOf(prefs.getString("start_page", "Início") ?: "Início") }
+    var accentIndex by remember { mutableIntStateOf(prefs.getInt("accent_index", 0).coerceIn(0, accents.lastIndex)) }
     var sourceType by remember { mutableStateOf("Xtream Codes") }
     var server by remember { mutableStateOf("") }
     var username by remember { mutableStateOf("") }
@@ -96,8 +121,13 @@ private fun IPTVPlusApp() {
     var category by remember { mutableStateOf("Todos") }
     var favoritesOnly by remember { mutableStateOf(false) }
     var fullscreen by remember { mutableStateOf(false) }
-    var bufferSetting by remember { mutableStateOf("10") }
-    var decoderMode by remember { mutableStateOf("auto") }
+    var bufferSetting by remember { mutableStateOf(prefs.getString("buffer_setting", "10") ?: "10") }
+    var decoderMode by remember { mutableStateOf(prefs.getString("decoder_mode", "auto") ?: "auto") }
+    var pipEnabled by remember { mutableStateOf(prefs.getBoolean("pip_enabled", true)) }
+    var keepScreenOn by remember { mutableStateOf(prefs.getBoolean("keep_screen_on", true)) }
+    var startPage by remember { mutableStateOf(prefs.getString("start_page", "Início") ?: "Início") }
+    var autoFullscreen by remember { mutableStateOf(prefs.getBoolean("auto_fullscreen", false)) }
+    var autoPlayNext by remember { mutableStateOf(prefs.getBoolean("auto_play_next", true)) }
     var selectedSeries by remember { mutableStateOf<TvItem?>(null) }
     val movies = remember { mutableStateListOf<TvItem>() }
     val series = remember { mutableStateListOf<TvItem>() }
@@ -122,6 +152,24 @@ private fun IPTVPlusApp() {
     }
     DisposableEffect(exoPlayer) { onDispose { exoPlayer.release() } }
     val accent = accents[accentIndex]
+    LaunchedEffect(bufferSetting, decoderMode, pipEnabled, keepScreenOn, startPage, autoFullscreen, autoPlayNext) {
+        prefs.edit()
+            .putString("buffer_setting", bufferSetting)
+            .putString("decoder_mode", decoderMode)
+            .putBoolean("pip_enabled", pipEnabled)
+            .putBoolean("keep_screen_on", keepScreenOn)
+            .putString("start_page", startPage)
+            .putBoolean("auto_fullscreen", autoFullscreen)
+            .putBoolean("auto_play_next", autoPlayNext)
+            .putBoolean("player_active", page == "Leitor")
+            .putInt("accent_index", accentIndex)
+            .apply()
+    }
+    LaunchedEffect(page, keepScreenOn) {
+        val window = (context as? Activity)?.window ?: return@LaunchedEffect
+        if (page == "Leitor" && keepScreenOn) window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        else window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+    }
     LaunchedEffect(fullscreen) {
         val activity = context as? Activity
         activity?.window?.decorView?.systemUiVisibility = if (fullscreen) {
@@ -131,7 +179,7 @@ private fun IPTVPlusApp() {
         } else 0
     }
 
-    fun play(item: TvItem) { selected = item; exoPlayer.setMediaItem(MediaItem.fromUri(item.url)); exoPlayer.prepare(); exoPlayer.playWhenReady = true; page = "Leitor"; fullscreen = false }
+    fun play(item: TvItem) { selected = item; exoPlayer.setMediaItem(MediaItem.fromUri(item.url)); exoPlayer.prepare(); exoPlayer.playWhenReady = true; page = "Leitor"; fullscreen = autoFullscreen }
     fun launchLoad(block: suspend () -> Unit) {
         loading = true
         (context as? ComponentActivity)?.lifecycleScope?.launch {
@@ -312,34 +360,69 @@ private fun IPTVPlusApp() {
                                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) { Button(onClick = { exoPlayer.play() }) { Icon(Icons.Default.PlayArrow, null); Text("Reproduzir") }; OutlinedButton(onClick = { exoPlayer.pause() }) { Icon(Icons.Default.Pause, null); Text("Pausa") }; OutlinedButton(onClick = { fullscreen = true }) { Icon(Icons.Default.Fullscreen, null); Text("Ecrã inteiro") } }
                             }
                         }
-                        "Definições" -> Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(16.dp)) {
-                            Text("Leitor de vídeo", fontSize = 20.sp, fontWeight = FontWeight.Bold)
+                        "Definições" -> Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                            Text("Reprodução", fontSize = 20.sp, fontWeight = FontWeight.Bold)
                             Text("Tamanho do buffer", fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
-                            Text("Mais buffer pode reduzir interrupções, mas aumenta o tempo inicial de carregamento.", color = muted, fontSize = 12.sp)
-                            listOf("5" to "5 segundos — ligação rápida", "10" to "10 segundos — equilibrado", "20" to "20 segundos — ligação instável", "30" to "30 segundos — buffer elevado").forEach { (value, label) ->
-                                Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(panel).clickable { bufferSetting = value }.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
-                                    Column(Modifier.weight(1f)) { Text(label, fontWeight = FontWeight.Medium); Text(if (bufferSetting == value) "Selecionado" else "", color = accent, fontSize = 11.sp) }
-                                    RadioButton(selected = bufferSetting == value, onClick = { bufferSetting = value })
+                            Text("Um buffer maior pode reduzir interrupções, mas aumenta o tempo inicial de carregamento.", color = muted, fontSize = 12.sp)
+                            listOf("5" to "5 s · ligação rápida", "10" to "10 s · equilibrado", "20" to "20 s · ligação instável", "30" to "30 s · buffer elevado").forEach { (value, label) ->
+                                SettingChoice(label, bufferSetting == value, accent) { bufferSetting = value }
+                            }
+                            HorizontalDivider(color = muted.copy(alpha=.2f))
+                            Text("Descodificação", fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                            listOf("auto" to "Automática (recomendada)", "software" to "Preferência de software (experimental)").forEach { (value, label) ->
+                                SettingChoice(label, decoderMode == value, accent) { decoderMode = value }
+                            }
+                            Text("A seleção por software depende do suporte do dispositivo e do formato. Se não funcionar, usa Automática.", color = muted, fontSize = 12.sp)
+                            HorizontalDivider(color = muted.copy(alpha=.2f))
+                            Text("Comportamento do player", fontSize = 20.sp, fontWeight = FontWeight.Bold)
+                            SettingToggle("Minimizar ao sair (PiP)", "Continua a ver o vídeo numa janela flutuante quando o Android permite.", pipEnabled, accent) { pipEnabled = it }
+                            SettingToggle("Manter ecrã ligado durante a reprodução", "Evita que o ecrã se desligue enquanto o player está aberto.", keepScreenOn, accent) { keepScreenOn = it }
+                            SettingToggle("Abrir player em ecrã inteiro", "Ativa o ecrã inteiro ao iniciar um canal ou vídeo.", autoFullscreen, accent) { autoFullscreen = it }
+                            SettingToggle("Ativar reprodução automática seguinte", "Preferência guardada; a passagem automática entre episódios será ligada numa etapa posterior.", autoPlayNext, accent) { autoPlayNext = it }
+                            HorizontalDivider(color = muted.copy(alpha=.2f))
+                            Text("Ao iniciar a aplicação", fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                            listOf("Início" to "Início", "TV em direto" to "TV em direto", "Filmes" to "Filmes", "Séries" to "Séries").forEach { (value, label) ->
+                                SettingChoice(label, startPage == value, accent) { startPage = value }
+                            }
+                            Text("Esta escolha abre o separador selecionado quando iniciares a aplicação.", color = muted, fontSize = 12.sp)
+                            HorizontalDivider(color = muted.copy(alpha=.2f))
+                            Text("Aparência", fontSize = 20.sp, fontWeight = FontWeight.Bold)
+                            accents.forEachIndexed { index, color ->
+                                Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(panel).clickable { accentIndex = index }.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                                    Box(Modifier.size(28.dp).background(color, RoundedCornerShape(50)))
+                                    Spacer(Modifier.width(12.dp))
+                                    Text(listOf("Violeta", "Ciano", "Menta", "Rosa", "Âmbar", "Azul", "Lilás", "Magenta")[index], Modifier.weight(1f))
+                                    if (accentIndex == index) Icon(Icons.Default.CheckCircle, null, tint = color)
                                 }
                             }
                             HorizontalDivider(color = muted.copy(alpha=.2f))
-                            Text("Descodificação de vídeo", fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
-                            Text("A alteração recria o leitor e aplica-se à próxima reprodução.", color = muted, fontSize = 12.sp)
-                            listOf("auto" to "Automático / hardware preferido", "software" to "Software preferido").forEach { (value, label) ->
-                                Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(panel).clickable { decoderMode = value }.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
-                                    Column(Modifier.weight(1f)) { Text(label, fontWeight = FontWeight.Medium); Text(if (value == "software") "Pode usar mais CPU e bateria" else "Recomendado para a maioria dos dispositivos", color = muted, fontSize = 11.sp) }
-                                    RadioButton(selected = decoderMode == value, onClick = { decoderMode = value })
-                                }
-                            }
-                            HorizontalDivider(color = muted.copy(alpha=.2f))
-                            Text("Cor de destaque", fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
-                            accents.forEachIndexed { index, color -> Row(Modifier.fillMaxWidth().clickable { accentIndex = index }.padding(vertical = 5.dp), verticalAlignment = Alignment.CenterVertically) { Box(Modifier.size(28.dp).background(color, RoundedCornerShape(50))); Spacer(Modifier.width(12.dp)); Text(listOf("Violeta", "Ciano", "Menta", "Rosa", "Âmbar", "Azul", "Lilás", "Magenta")[index], Modifier.weight(1f)); if (accentIndex == index) Icon(Icons.Default.CheckCircle, null, tint = color) } }
-                            HorizontalDivider(color = muted.copy(alpha=.2f)); Text("Sobre o IPTV+", fontWeight = FontWeight.SemiBold); Text("Versão 0.3.5 • Buffer configurável, descodificação e leitor em ecrã inteiro • Interface adaptativa para smartphone e Android TV", color = muted); Text("Compatibilidade de reprodução depende do formato do stream e das permissões do fornecedor.", color = muted, fontSize = 12.sp)
+                            Text("Sobre o IPTV+", fontWeight = FontWeight.SemiBold)
+                            Text("Versão 0.3.7 · Buffer configurável, preferências do player, janela PiP e interface adaptativa.", color = muted)
+                            Text("O funcionamento de PiP depende do Android e do dispositivo. A opção de descodificação por software é experimental.", color = muted, fontSize = 12.sp)
                         }
                     }
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun SettingChoice(label: String, selected: Boolean, accent: Color, onClick: () -> Unit) {
+    Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(panel).clickable { onClick() }.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+        Text(label, Modifier.weight(1f), fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal)
+        RadioButton(selected = selected, onClick = onClick, colors = RadioButtonDefaults.colors(selectedColor = accent))
+    }
+}
+
+@Composable
+private fun SettingToggle(title: String, detail: String, checked: Boolean, accent: Color, onChange: (Boolean) -> Unit) {
+    Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(panel).padding(horizontal = 12.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.weight(1f).padding(end = 8.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+            Text(title, fontWeight = FontWeight.SemiBold)
+            Text(detail, color = muted, fontSize = 12.sp)
+        }
+        Switch(checked = checked, onCheckedChange = onChange, colors = SwitchDefaults.colors(checkedThumbColor = accent))
     }
 }
 
